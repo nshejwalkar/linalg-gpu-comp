@@ -13,21 +13,42 @@ geqrf compact format, FP32, B200. NOTE: there are now TWO official boards (submi
   v19 = **6.44 ms, 22/22**. Structured run at DENSE speed (Householder is conditioning-agnostic, confirmed).
   **7 of 12 shapes are n512/n1024 → mid-shape speed (panel/megakernel) is doubly leveraged here.**
 
-## ⚡ AUTONOMOUS SESSION (user away ~2h from 2026-06-15 09:40 UTC / 02:40 PDT — trusted to drive)
-Directives: (1) mirror substantial subagent work to separate git BRANCHES; (2) when opus concludes,
-DECIDE + keep pushing the frontier; (3) pull in online DSL/B200 resources; (4) keep documenting in md.
-- **Branches:** `main` = integration (champion `submission.py` + research + docs). `tcgen05-sonnet` /
-  `tcgen05-opus` = the two Stage-1 work-streams (forked at ab93cc9). Worktree isolation UNAVAILABLE from
-  this shell cwd (not the repo) → mirror by committing each stream's distinct-prefixed files
-  (`stage1_v*`=sonnet, `opus_*`=opus) to its branch at conclusion; merge the winner to `main`.
-- **Live agents (3):** opus kernel `a79e04da385ad0c19` (Stage-1, racing — smoke COMPILES+LAUNCHES @02:44,
-  on a misaligned-address runtime bug; writes `tcgen05/opus_*`+`opus_progress.md`); sonnet kernel
-  `a3e48597ae1c1f454` (Stage-1 fallback, stuck at cute.gemm layout-verifier @v15 — STOP once opus has a
-  passing smoke); sonnet resources `a08a2593a815647f2` (→ `research/cutedsl_patterns.md`+`resource_gathering_progress.md`).
-  Monitor via progress files + `modal app list` hang-scan; ERR ON CAUTION killing ([[check-subagents-periodically]]).
-- **When opus lands the GATE verdict:** if tcgen05 BF16x9 BEATS cuBLAS on m∈{512,1024},K=B∈{64,128,256}
-  → build STAGE 2 (fused QR megakernel; opus; own branch; progress file). If NOT → document the no-go,
-  keep v19 champion, pivot (faster-panel polish / other). Either way: commit branches + update findings/RESUME.
+## ⚡ AUTONOMOUS SESSION (user away ~4-5h from 2026-06-15 ~10:20 UTC — trusted to drive the tcgen05 push)
+Directives: (1) mirror substantial subagent work to separate git BRANCHES; (2) DECIDE + keep pushing the
+frontier (the "gold" is tcgen05/Stage 2 — NVIDIA-sponsored comps want their stack, so winners likely use it);
+(3) pull online DSL/B200 resources; (4) keep RESUME+findings current (guard vs compact/limit loss).
+- **User is fetching top leaderboard solutions for me** (they can see them on the gpumode site). I requested
+  (priority order): `qr` top/fastest solutions (our exact problem — the 2.5ms club), then a B200 nvfp4/fp8/
+  blockscaled GEMM winner (tcgen05 structure + grader-shipping), then a B200 attention/fused-kernel winner.
+  When they paste solutions in, MINE them for the megakernel structure + shipping mechanics.
+- **Branches:** `main`=integration (champion `submission.py` + research + docs). `tcgen05-opus`=opus stream
+  (`opus_*` files), `tcgen05-sonnet`=sonnet stream (`stage1_v*`, archived). Worktree isolation UNAVAILABLE
+  from this shell cwd → mirror by committing each stream's distinct-prefixed files to its branch; merge winner→main.
+
+### STAGE 1 ✅ CRACKED by opus (the hard frontier capability — WORKING):
+- **Smoke PASS** (rel 9.3e-8) + **BF16x9 PASS** (9-pass Ozaki, single TMEM accumulator, **bit-exact FP32
+  rel 4.38e-7**, matches v18). Files: `tcgen05/opus_stage1.py` (smoke+bf16x9), `tcgen05/opus_bench.py` (gate).
+- **THE WORKING RECIPE (CuTe-DSL 4.5.2, reuse for Stage 2):** `make_trivial_tiled_mma(a_dtype,b_dtype,
+  OperandMajorMode.K,...,FP32,CtaGroup.ONE,(128,256))` → `make_smem_layout_a/b` (ComposedLayout: `.inner`
+  swizzle + `.outer` affine) → `recast_ptr(smem.iterator, layout.inner, BF16)` + `make_tensor(.outer)` for
+  scalar loads → `tiled_mma.make_fragment_A/B(sA)` DIRECTLY on staged SMEM (NOT partition_A) → acc via
+  `make_fragment_C(partition_shape_C(mma_tiler[:2]))` + `make_tensor(tmem_ptr, fake.layout)` → K-loop
+  `cute.gemm(tiled_mma, acc, tCrA[..k..], tCrB[..k..], acc)` + `tiled_mma.set(Field.ACCUMULATE,True)` after blk0.
+  MUST: TMEM via **`utils.TmemAllocator`** (`.allocate(512)`/`wait_for_alloc`/`retrieve_ptr` — raw alloc_tmem
+  MISALIGNS) ; MMA-completion via **`PipelineUmmaAsync`** acquire/commit in ONE warp-0 scope (raw mbarrier
+  HANGS) ; epilogue = `zipped_divide` into SUBTILE epi-tiles + `Ld32x32b.x64`. BF16x9 = 3-split→9 products =
+  PLAIN SUM (no scaling) → accumulate all 9 in ONE TMEM acc. `Field.NEGATE_A` fuses the QR trailing subtract.
+- **GATE (goal 3) IN PROGRESS:** `opus_bench.py` correctness proven at single-tile + grid(4,1) (rel 1.4e-6),
+  but multi-block benchmark CRASHES at N=512/grid(4,2). Suspect: bidy>0 N-tiling OR **TMEM CO-RESIDENCY**
+  (each block grabs all 512 TMEM cols; 2 blocks/SM → 2nd alloc faults — KEY Stage-2 constraint: ≤1 block/SM
+  taking full TMEM, or share). Opus isolating. Verdict pending: tcgen05 BF16x9 vs cublasLt type-78 (v18) vs torch FP32.
+- **DECISION when gate lands:** beats cuBLAS (likely at K=128/256; maybe not K=64 — BF16x9 breakeven ~K128,
+  FP32-accum halves throughput, findings/cutedsl_patterns.md §4,§6) → build STAGE 2 fused QR megakernel
+  (opus, `tcgen05-opus` branch, progress file: keep active region TMEM-resident, trailing update = in-kernel
+  tcgen05 BF16x9 MMA, NEGATE_A-fused subtract; target n512/n1024 where it's 7/12 of qr_v2). If NOT → document
+  no-go, keep v19, pivot (faster-panel). Either way commit branches + update findings/RESUME.
+- **Agents:** sonnet kernel + sonnet resources DONE/stopped. Opus kernel `a79e04da385ad0c19` LIVE (gate).
+  Monitor via `opus_progress.md` + `modal app list` hang-scan; ERR ON CAUTION killing ([[check-subagents-periodically]]).
 
 ## Current state
 - **Champion (submitted, ON BOTH BOARDS): v19** = `submissions/v19_fused.py` (= `submission.py`).
