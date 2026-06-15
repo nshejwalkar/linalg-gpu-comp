@@ -322,6 +322,16 @@ See also: [PROGRESS.md](../PROGRESS.md) (version/score table), [CLAUDE.md](../CL
   target lever. To reach 7128µs with them at geqrf, the OTHER FIVE (n32/176/352/512/1024) must go
   ~7.08ms→3.03ms geomean (**~2.3×**). Spend effort on the mid shapes (mixed-prec bmm + detector,
   v10 n32, faster panel), NOT on n2048/n4096. Keep those at geqrf (optionally fold v14's free ~1%).
+- **E3-update (v22, BF16x9 fat-trailing — CONFIRMED, corrects B6's large-n pessimism):** right-looking
+  blocked QR (geqrf-per-block panel, B=256) with **exact-FP32 BF16x9 cublasLt (type 78) trailing GEMM**
+  + fused in-place subtract → **n2048 73.5ms (1.046×), n4096 50.6ms (1.032×)**, 19/19, bit-exact, CV ≤0.3%.
+  Re-measured split: panel ~89–92% (cuSOLVER near-optimal; even the blocked panel alone, 68/45ms, already
+  beats full geqrf 77/52ms — i.e. cuSOLVER's own FP32 trailing is ~9ms I replace more cheaply). The
+  trailing GEMM here is FAT (K=B=256) so BF16x9 wins (~2–2.6× isolated) — unlike the mid shapes (B6):
+  on n4096, FP32 trailing LOSES (0.991×) and BF16x9 is the difference (1.032×). B=256 optimal; wide
+  solve_triangular is NOT the cost; 2-level/recursive (E-G) panel ~2× slower; custom Triton panel rejected
+  (batch 2–8 underfills SMs). **Ceiling ~1.03–1.05×; v22 = `submissions/v22_bign.py`, ready to fold into
+  the champion's large-n dispatch (wrap cublasLt in try/except→geqrf fallback for safety). +~1% geomean.**
 
 ## H. Backends available on the grader (probed on B200 mirror)
 

@@ -85,9 +85,11 @@ They were told NOT to edit findings.md/RESUME.md (avoid conflicts) — collect v
 - **Track A — megakernel** `submissions/v21_megakernel.py` (+ its own `modal_cute.py`). Fused tensor-core
   megakernel (CuTe-DSL → offline cubin → cuda.bindings driver-load) for n512/n1024; in-kernel MMA so the
   trailing isn't a skinny bmm. The real 2.5 ms path; hardest. agent a6357740f44d48480.
-- **Track B — n2048/n4096** `submissions/v22_bign.py`. Beat geqrf on b8n2048(77ms)/b2n4096(52ms) via a
-  custom blocked QR with BF16x9 FAT trailing GEMM (fat here, unlike mid shapes) + better panel/recursion.
-  8.30 of 9.76 log-budget. agent a8fdbacd21d1d8b3e.
+- **Track B — n2048/n4096 ✅ DONE (small win, ready to fold):** `submissions/v22_bign.py` — right-looking
+  blocked QR, geqrf panels + exact-FP32 BF16x9 (type 78) FAT trailing GEMM + fused subtract. **n2048
+  73.5ms (1.046×), n4096 50.6ms (1.032×)**, 19/19, bit-exact, CV ≤0.3%. Panel is ~90% wall (cuSOLVER
+  near-optimal) → ceiling ~1.03-1.05×. Folds to ~3.99ms (+~1%). TO INTEGRATE: take v22's large-n branch
+  only, wrap the cublasLt path in try/except→geqrf fallback for safety. agent a8fdbacd21d1d8b3e.
 - **Track C — faster panel** `submissions/v23_panel.py`. Speed the resident B=32 panel (42%) via
   num_warps/num_stages tuning + better reductions (+ optional nvrtc warp-shuffle panel). Safe ~3.4-3.6ms.
   agent af3662100fc43ee11.
