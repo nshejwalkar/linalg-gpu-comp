@@ -99,11 +99,22 @@ They were told NOT to edit findings.md/RESUME.md (avoid conflicts) — collect v
   73.5ms (1.046×), n4096 50.6ms (1.032×)**, 19/19, bit-exact, CV ≤0.3%. Panel is ~90% wall (cuSOLVER
   near-optimal) → ceiling ~1.03-1.05×. Folds to ~3.99ms (+~1%). TO INTEGRATE: take v22's large-n branch
   only, wrap the cublasLt path in try/except→geqrf fallback for safety. agent a8fdbacd21d1d8b3e.
-- **Track C — faster panel** `submissions/v23_panel.py`. Speed the resident B=32 panel (42%) via
-  num_warps/num_stages tuning + better reductions (+ optional nvrtc warp-shuffle panel). Safe ~3.4-3.6ms.
-  agent af3662100fc43ee11.
-When they land: A/B each vs v19 (4.03ms) same-container, pick winners, integrate into one submission,
-verify 19/19 + low CV + no "stream", submit via popcorn `--mode leaderboard`. Then update trackers.
+- **Track C — faster panel ✅ DONE (real win):** `submissions/v23_panel.py` = v19 + a hand-written
+  **CUDA smem-resident panel** (nvrtc-compiled, driver-launched) for n512/n1024, replacing the
+  register-bound Triton panel. Key: tile in smem with **bank-conflict-free LD=33** + warp-shuffle
+  reductions (Triton was spilling, ~220 regs). **n512 12.17ms, n1024 10.80ms** (panel 1.23×/1.18×, e2e
+  1.09×), 19/19, CV 0.1%, ranked wall 36.5s. Triton FALLBACK if CUDA path fails. n176/n352 keep Triton
+  (batch=40 underfills GPU). `qr` ~3.93ms; **qr_v2 ~6.12ms (hits 7/12 shapes — best lever there).**
+  ⚠️ first ranked use of the nvrtc/driver path → run popcorn `--mode test` before ranked. agent af3662100fc43ee11.
+
+## NEXT (in order)
+1. **Integrate B+C → v24** (= v23 CUDA panel + v22 large-n BF16x9 branch, both with fallbacks), validate
+   on Modal (19/19, geomean, CV), popcorn `--mode test` (confirm nvrtc+cublasLt on grader), then submit to
+   BOTH `qr` and `qr_v2`. Update trackers.
+2. **THEN go ALL IN on the tcgen05/TMEM warp-specialized megakernel** (user directive). Research running:
+   `research/tcgen05_tmem.md` (agent a01f665022e9bd333). Plan: Stage 1 tcgen05 BF16x9 GEMM spike (beat
+   cuBLAS on trailing shapes) → Stage 2 fused QR megakernel (TMEM-resident trailing, warp-spec). Ship via
+   the proven CuTe→cubin→driver-load pipeline (B8). The ONE architecture that escapes the B=32 wall.
 
 ## (history) Prior goal 7128 µs — ACHIEVED by v17.
 
