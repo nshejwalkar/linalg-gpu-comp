@@ -79,6 +79,21 @@ v19 mid-shape profile: **panel ~42%, GEMMs ~48%** (mostly FP32, skinny).
   whether to commit that effort vs bank v19. (Mine `research/gpumode_winners.md` for megakernel tricks.)
 Always: no substring "stream"; FP32 (H,tau); 19/19; keep timing CV low (D11); submit via popcorn `--mode leaderboard`.
 
+## IN-FLIGHT: parallel 2.5 ms attack (3 background subagents, launched ~2026-06-15)
+User said "do all three in parallel." Each on its own file; NONE submit; I consolidate the winner(s).
+They were told NOT to edit findings.md/RESUME.md (avoid conflicts) — collect verdicts from their reports.
+- **Track A — megakernel** `submissions/v21_megakernel.py` (+ its own `modal_cute.py`). Fused tensor-core
+  megakernel (CuTe-DSL → offline cubin → cuda.bindings driver-load) for n512/n1024; in-kernel MMA so the
+  trailing isn't a skinny bmm. The real 2.5 ms path; hardest. agent a6357740f44d48480.
+- **Track B — n2048/n4096** `submissions/v22_bign.py`. Beat geqrf on b8n2048(77ms)/b2n4096(52ms) via a
+  custom blocked QR with BF16x9 FAT trailing GEMM (fat here, unlike mid shapes) + better panel/recursion.
+  8.30 of 9.76 log-budget. agent a8fdbacd21d1d8b3e.
+- **Track C — faster panel** `submissions/v23_panel.py`. Speed the resident B=32 panel (42%) via
+  num_warps/num_stages tuning + better reductions (+ optional nvrtc warp-shuffle panel). Safe ~3.4-3.6ms.
+  agent af3662100fc43ee11.
+When they land: A/B each vs v19 (4.03ms) same-container, pick winners, integrate into one submission,
+verify 19/19 + low CV + no "stream", submit via popcorn `--mode leaderboard`. Then update trackers.
+
 ## (history) Prior goal 7128 µs — ACHIEVED by v17.
 
 ## How to run things (Windows, git-bash or PowerShell)
