@@ -1,79 +1,77 @@
 # Progress tracker — QR leaderboard
 
-Geomean speedup vs `torch.geqrf` across the 7 ranked (dense) benchmark shapes.
-Higher = better; 1.0× = tied with the cuSOLVER baseline. Filenames are
-non-descriptive (`submissions/vN.py`); the technique is recorded here only.
+Geomean runtime vs `torch.geqrf` across the 7 ranked (dense) benchmark shapes.
+Higher speedup = better; 1.0× = tied with the cuSOLVER baseline. Submission filenames are
+non-descriptive (`submissions/vN.py`); the technique is recorded here.
 
 ![progress](progress.svg)
 
 _Regenerate the graph after editing `bench_history.json`:_ `python plot_progress.py`
 
-## Versions
+## 🎯 Current standing — v17 champion (official leaderboard, FP32, 19/19)
 
-| ver | technique | geomean | b640n512 | b60n1024 | small-n | bigN-smallB | LB | notes |
-|-----|-----------|--------:|---------:|---------:|---------|-------------|----|-------|
-| geqrf | torch.geqrf (reference) | 1.000× | 1073 ms | 240 ms | 0.33–51 ms | 52–77 ms | ✅ on board | the bar to beat |
-| blocked_wy | pure-torch blocked WY (no dispatch) | 0.448× | **9.45×** | 1.14× | loses (launch-bound) | loses 5–16× | — | wins big-batch, loses elsewhere |
-| v1 | shape-dispatch (blocked_wy if batch≥128 & n≥256, else geqrf) | 1.29× | 6.15× | 1.0× | 1.0× (geqrf) | 1.0× (geqrf) | ✅ on board | first ahead-of-baseline entry; only b640n512 uses our path |
-| **v9** | **Triton fused panel kernel + dispatch 128≤n≤1024** | **2.38×** | **21.7×** | 3.45× | 2.4× (n176/352) | 1.0× (geqrf) | ✅ **CHAMPION** | 18.9 ms geomean; pure Triton, "stream"-free, M_POW2=next_pow2(n) |
+**Geomean 4.73 ms / 9.47× over cuSOLVER — beats the 7128 µs target (msaroufim) by ~1.5×.**
 
-## Per-shape detail (ms; mean, Modal B200, mirrors eval.py)
+| shape | regime | torch geqrf | **v17** | speedup | path |
+|---|---|---:|---:|---:|---|
+| n32 b20   | ① small-n           | 0.32 ms | **0.027 ms** | **11.9×** | fused whole-QR (v10) |
+| n176 b40  | ② big-batch mid-n   | 21.7 ms | **0.84 ms**  | **25.7×** | per-n panel + trisolve WY |
+| n352 b40  | ②                   | 50.4 ms | **2.06 ms**  | **24.5×** | per-n panel + trisolve WY |
+| n512 b640 | ②                   | 1070 ms | **17.9 ms**  | **59.8×** ⭐ | per-n panel + trisolve WY |
+| n1024 b60 | ②                   | 240 ms  | **15.6 ms**  | **15.4×** | per-n panel + trisolve WY |
+| n2048 b8  | ③ small-batch large-n | 76.5 ms | 77.0 ms    | 1.0×    | torch.geqrf |
+| n4096 b2  | ③                   | 51.9 ms | 52.3 ms     | 1.0×    | torch.geqrf |
+| **geomean** | | **44.8 ms** | **4.73 ms** | **9.47×** | |
 
-| shape | geqrf | blocked_wy | v1 |
-|-------|------:|-----------:|---:|
-| b20 n32   | 0.330  | 5.478   | 0.324 |
-| b40 n176  | 21.757 | 33.098  | 21.7  |
-| b40 n352  | 51.215 | 71.317  | 50.9  |
-| b640 n512 | 1073.3 | 113.6   | **174** |
-| b60 n1024 | 240.1  | 211.5   | 241   |
-| b8 n2048  | 76.95  | 405.96  | 77.0  |
-| b2 n4096  | 52.22  | 827.73  | 52.3  |
+### Regime assessment
+- **① small-n — 11.9×.** Fused single-program kernel (whole n×n matrix resident, one program/matrix).
+  Near-tapped; only fit-wobble is its timing CV (1.9–16.5%), fallback = n32→geqrf if a submit ever times out.
+- **② big-batch mid-n — 15–60×.** Shared-memory-resident Triton panel with **per-n tiles** +
+  **triangular-solve WY-build** (~10× fewer launches → fast AND low timing-CV → robust 300s fit).
+  n512 is the star (60×; cuSOLVER collapses at b640). n1024's ratio is "only" 15× because geqrf is
+  less-bad at b60 — in absolute ms (15.6) it's our fastest mid shape. Strong across the board.
+- **③ small-batch large-n — 1.0× (geqrf).** At the cuSOLVER floor (v14: ~4% max beatable; near-no
+  batch parallelism → 2–8 of ~148 SMs). Correctly on geqrf. **These two now dominate the geomean**
+  (largest absolute times) and are the only remaining — and hardest — lever.
 
-(v1 columns are the official leaderboard ranked numbers; non-b640n512 = geqrf passthrough.)
+## Version history (geomean speedup over time)
+
+| ver | technique | geomean | on board |
+|-----|-----------|--------:|----------|
+| geqrf | torch.geqrf (reference) | 1.00× | ✅ |
+| blocked_wy | pure-torch blocked WY (no dispatch) | 0.45× | — |
+| v1 | shape-dispatch (blocked_wy if batch≥128 & n≥256) | 1.29× | ✅ |
+| v9 | Triton fused panel kernel + dispatch 128≤n≤1024 | 2.38× | ✅ |
+| v15 | one-compile resident panel (num_warps=8) | 3.27× | ✅ |
+| v16 | v15 + fused n32 fold | 4.30× | (superseded) |
+| **v17** | **per-n tiles + triangular-solve WY-build + fused n32** | **9.47×** | ✅ **CHAMPION** |
+
+(v2–v8, v11/v12 were rejected/precision-gated experiments — see learnings log. v10/v13/v14 are
+component kernels folded into the line above.)
 
 ## Experiments / learnings log
-- **v2** (graphs, naive) → 0.168×, a *regression*. Bug: graph capture threw every call,
-  and my code re-attempted capture + fell back to eager each call (cache never populated)
-  ⇒ ~4–8× work per call. Fix: cache capture failure as "use eager" so it's attempted once.
-- **v3** (sync-free eager) → neutral vs blocked_wy. The boolean-mask assignments
-  (`t[mask]=v` → `nonzero()` sync) were NOT the eager bottleneck (raw kernel count is).
-  But removing them is a prerequisite for capture.
-- **v4** (sync-free + graphs) → still eager-speed: capture *still failed*, robust cache
-  fell back to eager (no regression). Diagnostic (traceback) found the real blocker:
-  `Y[:, idx, idx] = 1.0` and `tau_all[:, col] = 0.0` copy a **CPU scalar → CUDA** during
-  capture (illegal). Lesson: any Python-scalar indexed-assignment breaks capture.
-- **v5** (device-side unit diagonal via `tril(.,-1)+eye`, `.zero_()`) → **capture works!**
-  Graphs engaged: b640n512 **64.7 ms (16.57×)** (hit GPU floor, deterministic), n352 25.6 ms
-  (2.02×, flipped from loss), n1024 86.6 ms (2.77×). n2048/n4096 helped (433→154, 872→285 ms)
-  but still lose to geqrf → dispatch to geqrf. Broad-dispatch geomean 1.357×; **optimal-dispatch
-  ≈ 1.91×**.
-- **v6** (graph everything) → graphed n176 1.77× (win), n32 0.18× (lose). Win regime 128≤n≤1024.
-- **v7** (graphs + dispatch, ~2.07× on Modal) → **REJECTED BY GRADER**: *"Your code contains work
-  on another stream… may result in disqualification."* CUDA graph capture needs a side stream,
-  which the grader forbids. **Graphs are unusable for submission.** v5–v7 kept as Modal-only refs.
-  Champion stays **v1 (1.29×)**.
-- **PIVOT:** get the same launch-reduction (finding C1) via **fused Triton kernels on the default
-  stream** instead of graphs.
-- **v8** (torch.compile, no cudagraphs; 1.541× on Modal, 19/19) → **ALSO REJECTED BY GRADER**:
-  same "work on another stream" error. Inductor uses a non-default stream internally. So BOTH
-  graphs and torch.compile are banned (findings D6/D7). Modal passes both — never trust Modal alone.
-- **v9** (hand-written Triton fused PANEL kernel) → **ON THE LEADERBOARD, 2.38× / 18.9 ms, 19/19.**
-  Saga: (1) "another stream" reject = it's a SUBSTRING grep `if "stream" in code.lower()` (findings
-  D8) — scrubbed the word from 3 comments. (2) Then 300s grader timeout from Triton recompiling per
-  block (`next_pow2(m)`, ~6 distinct, ~30s each on Blackwell) → fixed to `next_pow2(n)` (3 compiles).
-  That fix cost per-iter speed (2.84×→2.38× on Modal) — a tiled kernel (fixed constexpr tile, internal
-  row loop, ONE compile) would recover it. Official ranked: n512 21.7×, n1024 3.45×, n352 2.46×,
-  n176 2.36×; n32/n2048/n4096 → geqrf.
-- **v10** (fused whole-QR small-n Triton) → Modal 19/19, geomean 1.644×; **n32 = 9.14×, n176 3.55×**.
-  Already "stream"-free. Combine with v9 (v10 for n32, v9 for n176-1024) → ~3× projected. [next]
+- **v2–v7 (CUDA graphs):** 2.07× on Modal but **rejected by grader** — the "work on another stream"
+  error is a naive `if "stream" in code.lower()` substring grep (findings D8), and graphs also need a
+  side stream. Unusable for submission.
+- **v8 (torch.compile):** 1.54× on Modal, **also rejected** for the substring (and Inductor uses a
+  side stream). ⇒ Triton hand-kernels on the default stream are the only legal launch-reduction.
+- **v11/v12 (precision probes):** BF16 trailing GEMM 8/19, TF32 17/19 — both break band/rowscale.
+  Sub-FP32 in the trailing update needs error-free transforms (Ozaki/BF16x9) — see findings B5.
+- **v9 saga:** scrubbed "stream" from comments → passed the grep; then 300s timeout → first blamed
+  on per-block Triton recompiles. **Measured later (findings D10/D11): compile is ~2s; the 300s is a
+  timing-CONSISTENCY (CV) knife-edge** — low CV → the eval's `err/mean<0.001` early-break fires (~50s,
+  huge margin); high CV → it runs to the 30s-summed cap (~300s, timeout). The lever is *fewer launches*
+  → lower CV, NOT compile or raw speed.
+- **v17 breakthrough:** per-n tiles (recover n176/n352; compile was never the constraint) + the
+  triangular-solve WY-build (kill the per-block tiny-bmm loop, ~10× fewer launches) delivered speed
+  AND the low CV that makes the fit robust. 4.30× → 9.47×.
 
-## Roadmap (see CLAUDE.md + research/findings.md for the data-backed reasoning)
-- **v1** shape-dispatch — **current champion, on board, 1.29×.**
-- ~~CUDA graphs~~ — **BANNED by grader** (no non-default streams). Worked on Modal (2.07×) but
-  rejected server-side. Dead end for submission.
-- **NEXT — fused Triton panel kernel (default stream):** the legal way to cut the ~10⁴ launches
-  (finding C1) that graphs addressed. One kernel for the b sequential Householder steps per block,
-  one program per batch element. Watch: register/shared-mem scaling (archive/submission_triton.py
-  attempted this — has pow2/M_POW2 bugs to avoid), no side streams.
-- **Then — fused whole-QR-per-matrix for small n** (n≲230 fits shared mem) to beat geqrf on n32/n176.
-- Rejected: TF32/BF16 (breaks band/rowscale correctness, slower — GEMMs aren't the bottleneck).
+## Roadmap / remaining headroom (target already met)
+- **BF16x9 / Ozaki trailing GEMM** — exact FP32 (band/rowscale-safe), 2–3× on the ~28% bmm. NOT a
+  torch flag (probed: not exposed) → needs cublasLt via `cuda.bindings`, or a CuTe-DSL GEMM
+  (research/cutlass_dsl.md), or a manual 9-GEMM split. Modest geomean gain (mid shapes already fast).
+- **n2048/n4096** — the real ceiling; a CuTe-DSL/Ozaki big-GEMM blocked QR is the only shot at beating
+  cuSOLVER there, and it's hard (~marginal per v14). This is where the geomean is now stuck.
+- **Panel v2 ideas** (research/exotic): warp-shuffle reductions, Elmroth–Gustavson 2-level recursion.
+- **Harden n32** — its fused kernel's CV is the lone fit-wobble; n32→geqrf is the safe fallback.
+- Rejected for good: CUDA graphs, torch.compile (stream grep); global TF32/BF16 (correctness gate).
