@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.vscode/
+*.ncu-rep
+*.nsys-rep
+*.qdrep
+auto_bench_log.*
