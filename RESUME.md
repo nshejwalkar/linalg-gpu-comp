@@ -13,6 +13,22 @@ geqrf compact format, FP32, B200. NOTE: there are now TWO official boards (submi
   v19 = **6.44 ms, 22/22**. Structured run at DENSE speed (Householder is conditioning-agnostic, confirmed).
   **7 of 12 shapes are n512/n1024 → mid-shape speed (panel/megakernel) is doubly leveraged here.**
 
+## ⚡ AUTONOMOUS SESSION (user away ~2h from 2026-06-15 09:40 UTC / 02:40 PDT — trusted to drive)
+Directives: (1) mirror substantial subagent work to separate git BRANCHES; (2) when opus concludes,
+DECIDE + keep pushing the frontier; (3) pull in online DSL/B200 resources; (4) keep documenting in md.
+- **Branches:** `main` = integration (champion `submission.py` + research + docs). `tcgen05-sonnet` /
+  `tcgen05-opus` = the two Stage-1 work-streams (forked at ab93cc9). Worktree isolation UNAVAILABLE from
+  this shell cwd (not the repo) → mirror by committing each stream's distinct-prefixed files
+  (`stage1_v*`=sonnet, `opus_*`=opus) to its branch at conclusion; merge the winner to `main`.
+- **Live agents (3):** opus kernel `a79e04da385ad0c19` (Stage-1, racing — smoke COMPILES+LAUNCHES @02:44,
+  on a misaligned-address runtime bug; writes `tcgen05/opus_*`+`opus_progress.md`); sonnet kernel
+  `a3e48597ae1c1f454` (Stage-1 fallback, stuck at cute.gemm layout-verifier @v15 — STOP once opus has a
+  passing smoke); sonnet resources `a08a2593a815647f2` (→ `research/cutedsl_patterns.md`+`resource_gathering_progress.md`).
+  Monitor via progress files + `modal app list` hang-scan; ERR ON CAUTION killing ([[check-subagents-periodically]]).
+- **When opus lands the GATE verdict:** if tcgen05 BF16x9 BEATS cuBLAS on m∈{512,1024},K=B∈{64,128,256}
+  → build STAGE 2 (fused QR megakernel; opus; own branch; progress file). If NOT → document the no-go,
+  keep v19 champion, pivot (faster-panel polish / other). Either way: commit branches + update findings/RESUME.
+
 ## Current state
 - **Champion (submitted, ON BOTH BOARDS): v19** = `submissions/v19_fused.py` (= `submission.py`).
   `qr` 4.03 ms / 11.1× (19/19); `qr_v2` 6.44 ms (22/22). Submit via popcorn `--leaderboard qr` AND
