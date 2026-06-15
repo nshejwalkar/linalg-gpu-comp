@@ -59,15 +59,19 @@ class SharedStorage:
 
 
 @cute.kernel
-def _gemm_kernel(gA: cute.Tensor, gB: cute.Tensor, gC: cute.Tensor):
+def _gemm_kernel(mA: cute.Tensor, mB: cute.Tensor, mC: cute.Tensor):
     tidx, _, _ = arch.thread_idx()
     bidx, bidy, _ = arch.block_idx()
     warp_id = arch.warp_idx()
     warp_id = arch.make_warp_uniform(warp_id)
     lane_id = arch.lane_idx()
 
-    m_off = bidx * TILE_M       # this block's row offset in M
-    n_off = bidy * TILE_N       # this block's col offset in N
+    KPACK = NPASS * BK          # packed K width = 9*K
+    # Per-block GMEM tiles via local_tile (proven correct vs manual ptr arithmetic).
+    gA = cute.local_tile(mA, (TILE_M, KPACK), (bidx, 0))      # (128, 9K)
+    gB = cute.local_tile(mB, (KPACK, TILE_N), (0, bidy))      # (9K, 256)
+    gC = cute.local_tile(mC, (TILE_M, TILE_N), (bidx, bidy))  # (128, 256)
+    Ncols = cute.size(mC, mode=[1])
 
     tiled_mma = bh.make_trivial_tiled_mma(
         BFloat16, BFloat16, OperandMajorMode.K, OperandMajorMode.K,
@@ -106,30 +110,25 @@ def _gemm_kernel(gA: cute.Tensor, gB: cute.Tensor, gC: cute.Tensor):
     sA_c = sA[None, None, None, 0]
     sB_c = sB[None, None, None, 0]
 
-    KPACK = NPASS * BK          # packed K width = 9*K
-    Ncols = cute.size(gC, mode=[1])
-    # This block's output tile in GMEM C: rows [m_off:m_off+128], cols [n_off:n_off+256]
-    gC_base = gC.iterator + (m_off * Ncols + n_off)
+    # GMEM C tile view matching the accumulator's rank-3 ((M,N),1,1) profile.
     gC_part = cute.make_tensor(
-        gC_base, cute.make_layout(((TILE_M, TILE_N), 1, 1), stride=((Ncols, 1), 0, 0)))
+        gC.iterator, cute.make_layout(((TILE_M, TILE_N), 1, 1), stride=((Ncols, 1), 0, 0)))
 
     # ---- MMA: accumulate all NPASS K-blocks (= BF16x9 over full K) in TMEM ----
     if warp_id == 0:
         acc_empty = acc_producer.acquire_and_advance()
         for p in cutlass.range(NPASS, unroll=1):
             k0 = p * BK
-            # A tile: rows [m_off:+128], packed-K cols [k0:k0+16]
             for i in cutlass.range(TILE_M * BK // 32, unroll=1):
                 idx = lane_id + i * 32
                 m = idx // BK
                 k = idx % BK
-                sA_c[(m, k), 0, 0] = gA[m_off + m, k0 + k]
-            # B tile: packed-K rows [k0:k0+16], cols [n_off:+256]; store as (n,k)
+                sA_c[(m, k), 0, 0] = gA[m, k0 + k]
             for i in cutlass.range(BK * TILE_N // 32, unroll=1):
                 idx = lane_id + i * 32
                 n = idx // BK
                 k = idx % BK
-                sB_c[(n, k), 0, 0] = gB[k0 + k, n_off + n]
+                sB_c[(n, k), 0, 0] = gB[k0 + k, n]
             arch.fence_view_async_shared()
             arch.sync_warp()
             tiled_mma.set(tc.Field.ACCUMULATE, p != 0)
@@ -162,9 +161,9 @@ def _gemm_kernel(gA: cute.Tensor, gB: cute.Tensor, gC: cute.Tensor):
 
 
 @cute.jit
-def run_gemm(gA: cute.Tensor, gB: cute.Tensor, gC: cute.Tensor,
-             grid_m: cutlass.Constexpr, grid_n: cutlass.Constexpr):
-    _gemm_kernel(gA, gB, gC).launch(grid=(grid_m, grid_n, 1), block=(128, 1, 1))
+def run_gemm(gA: cute.Tensor, gB: cute.Tensor, gC: cute.Tensor):
+    M = cute.size(gC, mode=[0]); N = cute.size(gC, mode=[1])
+    _gemm_kernel(gA, gB, gC).launch(grid=(M // TILE_M, N // TILE_N, 1), block=(128, 1, 1))
 '''
 
 
@@ -198,26 +197,27 @@ def _pack_bf16x9(A_fp32, B_fp32):
     return A_packed, B_packed
 
 
-@app.function(gpu="B200", image=cutlass_image, timeout=120, retries=0)
-def perf_gate():
+@app.function(gpu="B200", image=cutlass_image, timeout=150, retries=0)
+def perf_gate(use_lt: bool = True):
     import torch, traceback, time
     import cutlass.cute as cute
     from cutlass.cute.runtime import from_dlpack
 
     print("=" * 78)
-    print("OPUS STAGE1 PERF GATE — tcgen05 BF16x9 vs cublasLt type-78 vs torch FP32")
+    print(f"OPUS STAGE1 PERF GATE — tcgen05 BF16x9 vs cublasLt type-78 vs torch FP32 (use_lt={use_lt})")
     print("=" * 78)
 
     # ---- cublasLt type-78 (CUBLAS_COMPUTE_32F_EMULATED_16BFX9) via ctypes ----
     import ctypes
     lt = None
-    for name in ("libcublasLt.so.13",
-                 "/usr/local/lib/python3.11/site-packages/nvidia/cu13/lib/libcublasLt.so.13",
-                 "libcublasLt.so"):
-        try:
-            lt = ctypes.CDLL(name); break
-        except OSError:
-            continue
+    if use_lt:
+        for name in ("libcublasLt.so.13",
+                     "/usr/local/lib/python3.11/site-packages/nvidia/cu13/lib/libcublasLt.so.13",
+                     "libcublasLt.so"):
+            try:
+                lt = ctypes.CDLL(name); break
+            except OSError:
+                continue
     have_lt = lt is not None
     print(f"  cublasLt loaded: {have_lt}")
 
@@ -313,15 +313,17 @@ def perf_gate():
         gA = from_dlpack(A_packed); gB = from_dlpack(B_packed); gC = from_dlpack(C)
         grid_m = M // 128; grid_n = N // 256
         try:
-            if npass not in compiled_cache:
-                km = _build(npass, f"n{npass}")
-                compiled_cache[npass] = (km, cute.compile(km.run_gemm, gA, gB, gC, grid_m, grid_n))
-            km, comp = compiled_cache[npass]
-            # recompile if grid differs (compile is keyed on constexpr) — compile per (npass,grid)
-            comp = cute.compile(km.run_gemm, gA, gB, gC, grid_m, grid_n)
-            comp(gA, gB, gC, grid_m, grid_n); torch.cuda.synchronize()
+            ck = (npass, M, N)
+            print(f"    [shape {(M,N,K)}] npass={npass} grid=({grid_m},{grid_n}) compiling...", flush=True)
+            if ck not in compiled_cache:
+                km = _build(npass, f"n{npass}_{M}_{N}")
+                compiled_cache[ck] = (km, cute.compile(km.run_gemm, gA, gB, gC))
+            km, comp = compiled_cache[ck]
+            print(f"    [shape {(M,N,K)}] compiled; single run...", flush=True)
+            comp(gA, gB, gC); torch.cuda.synchronize()
             rel = ((C.double() - ref64).abs().max() / ref64.abs().max()).item()
-            t_tc = bench(lambda: comp(gA, gB, gC, grid_m, grid_n))
+            print(f"    [shape {(M,N,K)}] single-run OK rel={rel:.2e}; benching...", flush=True)
+            t_tc = bench(lambda: comp(gA, gB, gC))
             tc_ok = rel < 1e-5
         except Exception as e:
             print(f"  {(M,N,K)!s:>16} | tcgen05 FAILED: {type(e).__name__}: {str(e)[:80]}")
@@ -352,5 +354,5 @@ def perf_gate():
 
 
 @app.local_entrypoint()
-def main():
-    perf_gate.remote()
+def main(use_lt: str = "1"):
+    perf_gate.remote(use_lt=(use_lt == "1"))

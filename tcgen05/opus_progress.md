@@ -25,3 +25,60 @@ the trailing GEMM at m∈{512,1024}, K=B∈{64,128,256}.
 - 2026-06-15 03:08 — ⭐⭐ BF16x9 PASS! 9-pass Ozaki, single TMEM accumulator: err vs FP64 = 9.19e-6, rel = 4.38e-07 (matches v18 target 3e-7, well under 1e-5 gate); err vs torch FP32 = 9.54e-6. GOAL 2 DONE — bit-exact FP32 from bf16 tensor cores via TMEM accumulation. Now GOAL 3 = PERF GATE. Need: generalize kernel to M-tiled grid, N (MMA N<=256), K=B(64/128/256) via BF16x9; benchmark tcgen05-BF16x9 vs cublasLt type-78 (v18) vs torch FP32 on m in {512,1024}, N~m, K in {64,128,256}. Reading v18 baseline next.
 - 2026-06-15 03:12 — Built opus_bench.py: generalized M/N-tiled tcgen05 BF16x9 GEMM (grid=(M/128,N/256), NPASS=9*K/16, per-tile loads offset by block idx) + perf gate vs cublasLt type-78 (ctypes, COMPUTE 78) + torch FP32, on M in {512,1024} x K in {64,128,256}. Running (compiles 6 kernels; server timeout=120, local 200).
 - 2026-06-15 03:13 — Perf gate CRASHED on first shape (M=512 grid=(4,2)): GPU-level fault kills the worker before Python prints traceback; Modal retries 8x (input-level, not fn retries). Single-tile kernel was correct, so bug is in the multi-block generalization — suspect the manual `gC.iterator + (m_off*Ncols+n_off)` pointer arithmetic or A/B global indexing. Isolating with a single-shape correctness probe (grid 4,1, cleaner GMEM tiling via local_tile/coordinate slice) before re-running the gate.
+- 2026-06-15 03:15 — opus_probe_tile: local_tile-based tiling PASSES at M=512,N=256,K=64,grid(4,1),NPASS=36, rel-vs-FP64=1.44e-6. Confirms multi-block works + the opus_bench bug was the manual `gC.iterator+offset` arithmetic. Fix: use cute.local_tile for gA/gB/gC tiling in opus_bench. Rewriting opus_bench kernel with local_tile, then re-run gate (also covers N=512 grid bidy>0).
+- 2026-06-15 03:19 — Perf gate crashes on FIRST shape even with cublasLt DISABLED => bug is tcgen05 multi-block at grid (4,2) i.e. N=512 (grid_n=2, bidy=1 block). Single-shape probe was grid (4,1). Isolating grid(4,2)/N=512 in opus_probe_tile. Suspects: bidy>0 N-tiling (local_tile mB/mC col offset) OR TMEM co-residency (8 blocks each grab all 512 cols; if 2 share an SM the 2nd alloc faults).
+- 2026-06-15 03:24 — ⭐ PERF GATE RUNS. Bug was Constexpr grid passing; grid-from-shape fixed it. RESULTS (tcgen05 BF16x9 vs torch FP32, us): (512,512,64) 745 vs 5.5; (512,512,128) 1490 vs 6.4; (512,512,256) 2972 vs 9.0; (1024,1024,64) 749 vs 8.4; (1024,1024,128) 1492 vs 12.2; (1024,1024,256) 2982 vs 17.0. tcgen05 is 100-350x SLOWER. All rel ~1-4e-6 (correct). Time scales linearly with NPASS=9K/16 => dominated by SERIAL scalar SMEM loads + single-warp MMA issue (no TMA, no pipeline, 1 MMA-warp). Naive kernel = clear NO-GO as-is. Getting cublasLt-78 numbers next for the full table, then GATE VERDICT.
+
+---
+## FINAL SUMMARY — Stage 1 tcgen05 BF16x9 GEMM (opus)
+
+### What was built (all in opus_* files; sonnet's stage1_v*/probe_* untouched)
+- `opus_stage1.py` — standalone tcgen05 BF16x9 GEMM. SMOKE (1 MMA 128x256x16) + BF16x9 (9-pass).
+- `opus_bench.py` — generalized M/N-tiled GEMM + perf gate (tcgen05 vs cublasLt-78 vs torch FP32).
+- `opus_probe_*.py` — the de-risk probes that pinned the API/recipe.
+
+### GOAL 1 (smoke) — ✅ PASS. Single tcgen05 MMA, rel vs A.float()@B.float() = 9.3e-08.
+### GOAL 2 (BF16x9 accuracy) — ✅ PASS. 9-pass Ozaki, single TMEM accumulator:
+   rel vs FP64 = 4.38e-07 (matches v18 cublasLt-78's ~3e-7; well under 1e-5 gate). Bit-exact FP32 achieved.
+
+### GOAL 3 PERF GATE (B200) — tcgen05 BF16x9 vs cublasLt type-78 vs torch FP32 (us/call):
+   shape (M,N,K)    | tcgen05 | cublasLt78 | torchFP32
+   (512,512,64)     |  740.3  |    10.2    |   11.7
+   (512,512,128)    | 1472.9  |     9.1    |   11.0
+   (512,512,256)    | 2937.7  |     8.7    |    9.8
+   (1024,1024,64)   |  745.7  |     8.8    |   10.5
+   (1024,1024,128)  | 1481.9  |     9.0    |   12.2
+   (1024,1024,256)  | 2955.3  |     8.8    |   17.0
+   tcgen05 BF16x9 beat both baselines on 0/6 shapes. LOSES by ~70-330x.
+
+### ⛔ GATE VERDICT: NO-GO — do NOT proceed to Stage 2 (as currently scoped).
+Reasons (well-grounded, not just "my kernel is slow"):
+1. cublasLt type-78 (CUBLAS_COMPUTE_32F_EMULATED_16BFX9) IS ITSELF a fully-tuned tcgen05+Ozaki
+   kernel and clears the trailing GEMM in ~9 us flat across all 6 shapes. The Stage-1 thesis
+   ("TMEM accumulator un-skinnies the trailing GEMM") assumed the rival was a SKINNY BATCHED bmm
+   (B6's B=32 wall). But as a single contiguous-K GEMM, cuBLAS-78 already handles K=B in {64,128,256}
+   excellently — there is no skinniness left for TMEM to fix at the isolated-GEMM level.
+2. To even TIE cuBLAS-78 (~9 us), a hand-rolled tcgen05 BF16x9 must match NVIDIA's tuned library
+   kernel (TMA + warp-spec + deep pipelining). That leaves zero headroom for the QR-fusion win that
+   was the entire point — and these shapes are already near the ~8-10 us kernel-launch floor, so
+   there's little absolute time to claw back.
+3. My kernel's time scales PERFECTLY linearly with NPASS=9K/16 (740/1473/2938 us ≈ 1:2:4) => it is
+   100% bound by serial single-warp scalar SMEM loads + 1-warp MMA issue (no TMA/pipeline/multi-warp).
+   A full rewrite (TMA + PipelineTmaUmma + warp-spec, ~the dense_gemm.py persistent kernel) is the
+   ONLY way to be competitive — i.e. Stage 2 effort just to MATCH a library call we already have (v18/v22).
+
+### Caveat / where a GO could still live (for the parent's judgment)
+The gate measured the ISOLATED trailing GEMM, where cuBLAS-78 is unbeatable. The ORIGINAL megakernel
+thesis is about FUSION: keeping the active panel TMEM-resident and folding panel+trailing+subtract
+into ONE kernel to kill launch overhead and HBM round-trips between the ~B steps of blocked QR. That
+end-to-end win is NOT captured by this isolated-GEMM gate and is NOT refuted by it — but it is a much
+bigger, riskier build (full warp-specialized megakernel) and cannot lean on "tcgen05 beats cuBLAS on
+the trailing GEMM" as its justification, because (per this gate) it does not. Recommend: BANK the
+working v19/v24 + v22 BF16x9-cublasLt large-n path; only pursue the TMEM megakernel if the parent
+wants to bet on the fusion/launch-overhead win directly, eyes open that the per-GEMM lever is dead.
+
+### Reusable assets delivered
+- A CORRECT, bit-exact (4e-7) standalone tcgen05 BF16x9 GEMM in CuTe-DSL on B200 — the hard
+  CuTe-DSL recipe is now fully pinned & working (TmemAllocator + PipelineUmmaAsync + make_smem_layout_a/b
+  + recast/affine + make_fragment_A/B + Ld32x32b epilogue). This unblocks ANY future tcgen05 work.
+- A working cublasLt-78 ctypes single-GEMM benchmark wrapper.

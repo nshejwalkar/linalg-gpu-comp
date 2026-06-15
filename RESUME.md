@@ -38,17 +38,22 @@ frontier (the "gold" is tcgen05/Stage 2 — NVIDIA-sponsored comps want their st
   MISALIGNS) ; MMA-completion via **`PipelineUmmaAsync`** acquire/commit in ONE warp-0 scope (raw mbarrier
   HANGS) ; epilogue = `zipped_divide` into SUBTILE epi-tiles + `Ld32x32b.x64`. BF16x9 = 3-split→9 products =
   PLAIN SUM (no scaling) → accumulate all 9 in ONE TMEM acc. `Field.NEGATE_A` fuses the QR trailing subtract.
-- **GATE (goal 3) IN PROGRESS:** `opus_bench.py` correctness proven at single-tile + grid(4,1) (rel 1.4e-6),
-  but multi-block benchmark CRASHES at N=512/grid(4,2). Suspect: bidy>0 N-tiling OR **TMEM CO-RESIDENCY**
-  (each block grabs all 512 TMEM cols; 2 blocks/SM → 2nd alloc faults — KEY Stage-2 constraint: ≤1 block/SM
-  taking full TMEM, or share). Opus isolating. Verdict pending: tcgen05 BF16x9 vs cublasLt type-78 (v18) vs torch FP32.
-- **DECISION when gate lands:** beats cuBLAS (likely at K=128/256; maybe not K=64 — BF16x9 breakeven ~K128,
-  FP32-accum halves throughput, findings/cutedsl_patterns.md §4,§6) → build STAGE 2 fused QR megakernel
-  (opus, `tcgen05-opus` branch, progress file: keep active region TMEM-resident, trailing update = in-kernel
-  tcgen05 BF16x9 MMA, NEGATE_A-fused subtract; target n512/n1024 where it's 7/12 of qr_v2). If NOT → document
-  no-go, keep v19, pivot (faster-panel). Either way commit branches + update findings/RESUME.
-- **Agents:** sonnet kernel + sonnet resources DONE/stopped. Opus kernel `a79e04da385ad0c19` LIVE (gate).
-  Monitor via `opus_progress.md` + `modal app list` hang-scan; ERR ON CAUTION killing ([[check-subagents-periodically]]).
+- **GATE (goal 3) = NO-GO (decisive, findings B9):** tcgen05 BF16x9 LOST 0/6 by 70–330× (740–2955µs vs
+  cublasLt type-78 ~9µs). Reason: **cublasLt-78 IS a fully-tuned tcgen05+Ozaki kernel** → already does the
+  trailing GEMM at speed-of-light; the "TMEM un-skinnies it" thesis (assumed a skinny *batched* rival) is wrong.
+- **HEADROOM ⇒ v19's structure can't reach 2.5ms incrementally:** mid-shape = panel 42% + GEMM 48% (cuBLAS-
+  optimal) + copies 7%. A megakernel only fuses away ~7% (copies/overhead); the 48% GEMM floor is immovable.
+  **2.5ms needs a FUNDAMENTALLY DIFFERENT approach.** (The fastest `qr` competitor solutions — user fetching —
+  are now the key to finding it. Don't blindly build the full warp-spec megakernel: undermined + low headroom.)
+- **DECISION MADE (gate NO-GO):** (1) bank v19/v24/v22 (the validated wins). (2) Do NOT build Stage-2
+  megakernel speculatively. (3) Await the competitor solutions (esp. fastest `qr`) to identify the real 2.5ms
+  path. (4) tcgen05 BF16x9 GEMM is a PROVEN, ready asset (recipe above) if a solution shows it's used helpfully.
+- **NEXT ACTIONS (autonomous window):** land **v24 on BOTH boards** (retry — earlier submit hit the daily
+  rate-limit; `cp submissions/v24_combo.py submission.py` then popcorn `--leaderboard qr` AND `qr_v2`);
+  finalize `tcgen05-opus` branch; when solutions arrive → analyze + decide the next real lever.
+- **Agents:** ALL DONE (sonnet kernel stopped @superseded; sonnet resources done → `cutedsl_patterns.md`;
+  opus kernel `a79e04da385ad0c19` delivered the NO-GO verdict). No live agents. Monitor rule: ERR ON CAUTION
+  killing, agent `.output` size is NOT a liveness signal ([[check-subagents-periodically]]).
 
 ## Current state
 - **Champion (submitted, ON BOTH BOARDS): v19** = `submissions/v19_fused.py` (= `submission.py`).

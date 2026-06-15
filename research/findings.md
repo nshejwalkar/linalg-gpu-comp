@@ -127,6 +127,31 @@ See also: [PROGRESS.md](../PROGRESS.md) (version/score table), [CLAUDE.md](../CL
   regression). The ONLY escape to 2.5ms = **tcgen05/TMEM warp-specialized blocked megakernel + 2-level
   wide-WY + BF16x9-for-exact-FP32** — frontier, big, uncertain. Pipeline to compile/ship it is now wired.
 
+### B9: tcgen05 BF16x9 GEMM — BUILT + bit-exact, but the isolated-GEMM lever is a measured NO-GO [CONFIRMED]
+- **Stage 1 fully cracked (opus, `tcgen05/opus_stage1.py` + recipe in RESUME):** a correct CuTe-DSL tcgen05
+  BF16x9 GEMM. Single MMA rel 9.3e-8; **9-pass Ozaki rel-vs-FP64 4.38e-7 = bit-exact FP32** (matches v18).
+  Hard-won recipe: `make_trivial_tiled_mma`+`make_smem_layout_a/b`+`recast_ptr(swizzle→ptr)`+`make_fragment_A(sA)`
+  + **`utils.TmemAllocator`** (raw `alloc_tmem` → misaligned-addr fault) + **`PipelineUmmaAsync`** for
+  MMA-completion (raw mbarrier hangs) + `zipped_divide`/`Ld32x32b.x64` epilogue. REUSABLE for any tcgen05 work.
+- **PERF GATE = NO-GO (0/6, lost 70–330×):** on m∈{512,1024},N=m,K∈{64,128,256}: tcgen05 BF16x9 740–2955µs
+  vs **cublasLt type-78 ~9µs** vs torch FP32 ~10–17µs. opus's kernel is naive (single-warp scalar loads, no
+  TMA/pipelining, load-bound — scales linearly with the 9·K/16 passes), BUT the structural point stands:
+  **cublasLt type-78 IS a fully-tuned tcgen05+Ozaki kernel** → it already does the (non-batched, contiguous-K)
+  trailing GEMM at speed-of-light. No skinniness for TMEM to fix; zero headroom to beat a library call we
+  already use (v22). The "TMEM un-skinnies the trailing GEMM" thesis assumed a skinny *batched* bmm rival; wrong.
+- **HEADROOM analysis ⇒ v19's structure CANNOT reach 2.5ms incrementally.** v19 mid-shape profile (C5):
+  panel ~42% + GEMMs ~48% (cuBLAS-optimal per the gate) + copies ~7%. A fused megakernel can only remove the
+  fusable ~7% (copies/launch overhead) + round-trips; the 48% GEMM floor is immovable (cuBLAS-optimal) and the
+  42% panel is sequential. To halve mid-shape time (2.5ms needs ~2×) with a 48% optimal-GEMM floor is
+  ~mathematically impossible by restructuring this algorithm. ⇒ **2.5ms requires a FUNDAMENTALLY DIFFERENT
+  approach, not incremental tuning of the blocked-WY structure.** (Caveat: the gate tested isolated single
+  GEMMs at K∈{64,128,256}; v19's REAL trailing update is a *batched* bmm K=B=32 — a megakernel MIGHT help that
+  specific batched-skinny case, but matching cuBLAS in-kernel needs full TMA+warp-spec, huge effort, ≤~7-15% ceiling.)
+- **DECISION:** do NOT blindly build the full warp-spec megakernel (undermined justification + low headroom +
+  huge effort). Bank v19/v24 + v22. The user is fetching top leaderboard solutions (esp. the fastest `qr`) —
+  those are now the key input to identify the fundamentally-different 2.5ms approach. tcgen05 stays a proven,
+  ready capability if a solution shows it's used in a way that helps.
+
 ## C. Performance bottleneck (profiling)
 
 ### C1: blocked_wy is CPU-dispatch / launch-bound, not FLOP-bound [CONFIRMED]
