@@ -62,9 +62,18 @@ frontier (the "gold" is tcgen05/Stage 2 — NVIDIA-sponsored comps want their st
   Q2 roofline (reconciles to e2e): v19 = 8.6 TFLOP/s; gap SPLIT = PANEL 40-44% (sequential, algorithmic) +
   skinny-K=32 TRAILING 28-31% @ 23%RL (un-fixable). Both trace to the B=32 block-width tension (resident panel
   → skinny trailing; wider B → non-resident, B7 dead). **2.5ms needs a fundamentally different panel/factorization.**
-- **HOLDING:** my analysis has exhausted the incremental space (tcgen05 GEMM dead both shapes; panel needs an
-  algorithmic change). **Next real input = the fastest `qr` competitor solution** (user fetching) → it should
-  reveal how the 2.5ms club breaks the B=32 tension. No more speculative spawns until then (avoid rabbit-hole).
+- **⭐ COMPETITOR SOLUTIONS ARRIVED (nvfp4 GEMM family) → see `research/competitor_solutions.md`. Two unlocks:**
+  (1) **SHIPPING: winners use `load_inline` (raw CUDA + inline PTX, `-gencode=...sm_100a`) — incl. gau.nernst's
+  `modal_nvfp4_dual_gemm` on Modal B200 (OUR infra). So the GRADER HAS nvcc; findings H1 ("no nvcc") tested the
+  Modal MIRROR, not the grader.** ⇒ write the QR kernel in RAW CUDA C++ + PTX, NO CuTe-DSL/cubin. (2) **The
+  "megakernel" = warp specialization + multi-stage smem ring + mbarrier pipeline (NO side-streams)** — TMA warp
+  runs ahead loading, MMA warp computes, epilogue warps drain; that ring IS the look-ahead pipeline that hides
+  our 40% panel. gau.nernst `nvfp4_gemm` = cleanest PTX-helper template.
+- **#1 NEXT ACTION (gates everything): verify `load_inline` works on the `qr` grader** — minimal hello-kernel via
+  popcorn `--mode test` once the submission rate-limit clears. If yes → raw-CUDA path: port opus's working tcgen05
+  BF16x9 MMA into gau.nernst's warp-spec+TMA-ring skeleton → trailing GEMM → then add a panel warp = the QR
+  megakernel (overlap sequential panel w/ pipelined trailing). More solutions (dual-gemm 2-SM, deltanet sequential
+  recurrence) incoming.
 - **Banked/standing:** v19 live on both boards (real champion). v24 (panel+large-n, ~3.9ms qr) staged+committed
   but **submit BLOCKED by a HARD persistent cap (`0/0 per hour` confirmed across 3 retries over ~2.5h → it's a
   DAILY/account cap, NOT hourly; today's quota spent on the v19→qr + v19→qr_v2 submissions).** Do NOT waste more

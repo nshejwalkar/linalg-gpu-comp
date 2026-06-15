@@ -413,8 +413,13 @@ See also: [PROGRESS.md](../PROGRESS.md) (version/score table), [CLAUDE.md](../CL
 ### H1: what imports / runs on the grader [CONFIRMED via probe_env.py]
 - **Importable:** torch 2.12+cu130, triton 3.7, numpy, **`cuda.bindings` 13.0.3 (.nvrtc + .driver)**.
 - **NOT importable:** cutlass, cutlass_library, nvidia.cutlass, cute, cupy, numba.
-- **NOT on PATH:** nvcc, ptxas, ninja, cicc (gcc/g++ present). ⇒ `torch.utils.cpp_extension.load_inline`
-  FAILS ("Ninja is required"). No grade-time C++/CUDA-C-to-binary via the torch path.
+- **NOT on PATH (⚠️ on the MODAL MIRROR `modal_qr.py` image — NOT necessarily the real grader):** nvcc, ptxas,
+  ninja, cicc (gcc/g++ present) ⇒ `load_inline` FAILS ("Ninja is required") *on our mirror*.
+  **⚠️ LIKELY WRONG FOR THE REAL GRADER (2026-06-15):** winning nvfp4 solutions — incl. gau.nernst's
+  `modal_nvfp4_dual_gemm` on **Modal B200 (same infra as qr)** — ship via `torch.utils.cpp_extension.load_inline`
+  with `-gencode=arch=compute_100a,code=sm_100a`, so the GRADER HAS nvcc + builds at runtime. This whole bullet
+  was a mirror-vs-grader confusion. **RE-VERIFY on the qr grader** (minimal load_inline `--mode test`); if it works,
+  prefer the raw-CUDA+load_inline shipping path over CuTe→cubin (see `research/competitor_solutions.md`).
 - **Triton AOT works:** `compiled.asm` has `ptx` + `cubin`; n_regs/spills/shared readable.
 - **Embedded-PTX path WORKS end-to-end:** nvrtc compiles CUDA C→PTX, and driver
   `cuModuleLoadData`+`cuModuleGetFunction` load+bind it (all rc=0).
