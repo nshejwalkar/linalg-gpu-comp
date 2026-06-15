@@ -48,3 +48,39 @@ the leaderboard CLI only exposes YOUR OWN submissions, so competitor source is m
 - BF16x9 exact-FP32: implement the 3-split→9-bf16-MMA Ozaki scheme on tcgen05 (the microbenchmarking
   paper confirms the extended-precision path); cross-check vs v18's cublasLt type-78 numbers (findings B6).
 - Stage 2 (fused QR megakernel): TMEM-resident trailing update + warp-spec, per `research/tcgen05_tmem.md`.
+
+---
+
+## Additional sources added 2026-06-15 (from research/cutedsl_patterns.md session)
+
+### CuTe-DSL Python API docs (CONFIRMED sources)
+- **CUTLASS utils_sm100 API:** https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_api/utils_sm100.html — make_trivial_tiled_mma (full sig confirmed), make_smem_layout_a/b, get_num_tmem_alloc_cols, get_tmem_load_op, compute_epilogue_tile_shape
+- **CUTLASS tcgen05 DSL API:** https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_api/cute_nvgpu_tcgen05.html — MmaF16BF16Op sig, Field enum (ACCUMULATE/NEGATE_A/NEGATE_B), SmemLayoutAtomKind values, Ld32x32bOp, make_tmem_copy, commit
+- **CUTLASS cpasync (TMA) API:** https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_api/cute_nvgpu_cpasync.html — make_tiled_tma_atom full sig, tma_partition, update_tma_descriptor, fence_tma_desc_acquire/release
+- **CUTLASS arch API:** https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_api/cute_arch.html — alloc_tmem/dealloc_tmem/relinquish, mbarrier_arrive_and_expect_tx, elect_one, cvt_f32x2_bf16x2
+- **CUTLASS pipeline API:** https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_api/pipeline.html — PipelineTmaUmma, PipelineUmmaAsync, PipelineTmaAsync, PipelineState, NamedBarrier, PipelineProducer/Consumer full method signatures
+- **CUTLASS JIT options:** https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_general/dsl_jit_compilation_options.html — KeepCUBIN/KeepPTX/OptLevel confirmed
+
+### Triton Gluon (COMPLETE SOURCE OBTAINED)
+- **Triton Gluon 06-tcgen05.py FULL SOURCE:** https://github.com/triton-lang/triton/blob/main/python/tutorials/gluon/06-tcgen05.py
+  Complete: TensorMemoryLayout, allocate_tensor_memory, tcgen05_mma(a,b,acc,use_acc), tcgen05_commit(bar),
+  mbarrier.init/expect/wait/invalidate, tma.async_load, fence_async_shared, NVMMASharedLayout, TensorDescriptor,
+  both blocked and pipelined matmul kernels with double-buffer counter pattern.
+
+### Performance numbers (CONFIRMED from arXiv 2512.02189)
+- tcgen05 SI-LAT: **11.0 cycles** (m64n64k16) vs Hopper 32.0 cycles → 2.9× lower
+- TMEM bandwidth: **16 TB/s read** per SM
+- FP16→FP32 throughput: **482 TFLOPS** (FP32 accum halves throughput vs FP16 accum)
+- CTA-pair gain: **1.27×** training speedup
+- 2-SM perfect weak scaling (2× throughput)
+
+### Warp-spec + swizzle (confirmed from Modular + SemiAnalysis)
+- TMA = single-thread issue (one elected thread issues cp.async.bulk.tensor)
+- SMEM 128B swizzle = Swizzle<3,4,3>; LBO=1024B, SBO=128B
+- tcgen05 = single-thread issue (ThrID=Layout<1> in CuTe, vs Hopper Layout<128>)
+- With TMA+tcgen05+swizzle: 288 TFLOPS achieved in Modular series
+
+### blackwell_helpers.py (key finding)
+- https://raw.githubusercontent.com/NVIDIA/cutlass/main/python/CuTeDSL/cutlass/utils/blackwell_helpers.py
+  **CONFIRMED ab_dtype is DEPRECATED** — use a_dtype/b_dtype separately in make_trivial_tiled_mma.
+  Both APIs coexist in 4.5.2; new kernel code should use split API.
