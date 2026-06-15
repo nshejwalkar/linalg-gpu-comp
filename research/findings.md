@@ -127,6 +127,22 @@ See also: [PROGRESS.md](../PROGRESS.md) (version/score table), [CLAUDE.md](../CL
   dominate. v13 geomean time ≈ 13.3 ms (target 7.13). Remaining levers: n2048/n4096 (v14), n32 (v10),
   mixed-precision on bmm (band/rowscale gate → needs detector), fuse the WY-build T-recurrence.
 
+### C5: v17 profiled breakdown — the trailing SUBTRACT is ~32%, bigger than the GEMMs [CONFIRMED]
+- **Evidence (--mode profile, v17, leaf-kernel self-CUDA, n512 / n1024):**
+  panel kernel ~31% / 33%; **elementwise (the `A_trail -= Y@TC` subtract + WY-build ops) ~32% / ~30%**;
+  GEMMs (bmm + cutlass/magma sgemm: trailing + Gram + trisolve-internal) ~22% / ~24%; trsm (trisolve)
+  ~8% / ~5%; copies ~17%. do_bench 18.1 / 16.3 ms.
+- **Aim for 2.5 ms (mid shapes):**
+  1. **Fuse the trailing subtract into the GEMM** — replace `H[k:,k+b:] -= bmm(Y,TC)` with
+     `torch.baddbmm(H_slice, Y, TC, beta=1, alpha=-1)` (one cuBLAS GEMM with beta, subtract free) OR a
+     CuTe-DSL GEMM with a subtract epilogue. Kills the ~16% sub kernel. EASY + big, FP32-exact.
+  2. **Cut copies/clones (~17%)** — operate in-place, drop redundant `.clone()`s.
+  3. **BF16x9 on the GEMMs (~22%)** → ~1.15× (keystone v18); a cublasLt route can ALSO fuse the
+     subtract via beta=1 (captures #1 for free).
+  4. **Panel (~31%)** → panel-v2 (warp-shuffle reductions, Elmroth–Gustavson recursion).
+- Note: the profiler's Triton attr dump prints "0 compiled variant(s)" — Triton 3.7 uses
+  `device_caches`, not `.cache`; the per-kernel TIMING table is correct (that's what matters here).
+
 ## D. CUDA graphs — capture rules (hard-won)
 
 ### D1: Naive graph wrapper regressed 7× [REJECTED→FIXED]

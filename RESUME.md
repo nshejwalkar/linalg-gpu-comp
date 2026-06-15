@@ -33,8 +33,13 @@ Beat **7128 µs** geomean on the GPU MODE `qr` leaderboard (B200). Return (H,tau
   (Each subagent reports per-shape ms + X/19 in its final message; if lost, re-benchmark with auto_bench.)
 
 ## Status (~2026-06-15)
-- **🎯 Champion ON BOARD: v17 — geomean 4.73 ms / 9.47× — BEATS the 7128 µs target (msaroufim).**
-  `submissions/v17_regime2.py` (= `submission.py`). 19/19. Composition:
+- **🎯 Champion ON BOARD: v19 — geomean 4.03 ms / 11.1× — beats 7128 µs target; pushing for 2.5 ms.**
+  `submissions/v19_fused.py` (= `submission.py`). 19/19, bit-exact to v17, low CV. = v17 + fused
+  trailing subtract (`baddbmm(A_trail, Y, W, beta=1, alpha=-1, out=A_trail)` → killed the ~16% subtract
+  kernel AND the copy-back; copies 61%→7%). Official: n32 27µs, n176 634µs, n352 1.63ms, n512 13.3ms,
+  n1024 11.7ms, n2048 76.8ms, n4096 52.2ms. v19 profile: panel ~42%, GEMMs ~48% → next levers.
+  **v18 (BF16x9 GEMM) building → merge into v19 = v20.** Then panel-v2 + n2048/n4096 attack.
+- (history) v17 — geomean 4.73 ms / 9.47× — first to beat the 7128 µs target. Composition:
   - panel (128≤n≤1024, batch≥32): shared-mem resident Triton, **per-n tiles** (M_POW2=next_pow2(n),
     num_warps 4/8/16) + **triangular-solve WY-build** (T⁻¹=diag(1/τ)+striu(VᵀV,1), one batched solve →
     ~10× fewer launches than the old per-block bmm recurrence → low CV → robust early-break/fit).
@@ -53,21 +58,24 @@ Beat **7128 µs** geomean on the GPU MODE `qr` leaderboard (B200). Return (H,tau
   AND future kernels AND CUTLASS. Cheap shot in flight: v15 with num_warps=8 (maybe compiles faster).
 - Next once a fast panel LANDS: fold v10 n32 (9.14×) + mixed-precision TF32 detector on the mid-shape bmm.
 
-## Next actions (toward 7128 µs; champion v9 = 18.9 ms)
-1. **Tiled panel kernel** (highest value): rewrite v9's `_panel_qr_kernel` with a FIXED constexpr
-   row-tile (e.g. BLOCK_M=128) and an internal loop over panel height, so there's ONE compile for
-   all sizes (fixes the 300s timeout robustly) AND recovers the per-block speed (~2.84×). Then widen
-   dispatch / tune.
-2. **Combine v10 into v9**: use v10's fused whole-QR kernel for n=32 (9.14×; v9 leaves it at geqrf),
-   v9's panel for n176–1024. Both Triton, "stream"-free. → ~3× projected. Keep submission "stream"-free.
-3. **Block-size tune**: `python auto_bench.py --sweep <file>` (or hand-set `_BLOCK`).
-4. **Mixed precision w/ detector** (findings B4): now that big shapes are compute-bound, TF32 on dense
-   + FP32 fallback for band/rowscale (cheap row-norm-ratio / zero-fraction probe). De-risked: TF32
-   passes all dense, only band/rowscale need FP32.
-5. **Attack n2048/n4096** (still geqrf, 1.0×): a Triton/custom QR that beats cuSOLVER small-batch
-   large-n — the hardest piece, needed to actually reach 7.13 ms.
-Always: keep the submission free of the substring "stream"; validate with popcorn `--mode test` (or
-go straight to `--mode leaderboard`, which rejects fast). Watch the 300s timeout (few constexprs).
+## NEW GOAL: 2.5 ms geomean (from v17's 4.73 ms — another ~1.9×)
+Geomean math (logs): current sum 10.86 (need 6.41 for 2.5 ms → cut 4.45). n2048+n4096 (geqrf, 77+52ms)
+contribute 8.29; the 5 mid shapes contribute 2.57. Two ways, must likely STACK both:
+- **Mid shapes (n32/176/352/512/1024): need ~2.4× each if n2048/4096 stay at geqrf.** Levers:
+  (a) **BF16x9 / Ozaki trailing GEMM** — exact FP32 (band/rowscale-safe, findings B5), 2–3× on the
+  ~28% bmm → ~1.2–1.3× on n512/n1024. NOT a torch flag (probed); needs cublasLt via `cuda.bindings`
+  (compute type `CUBLAS_COMPUTE_32F_EMULATED_16BFX9`) or CuTe-DSL. **KEYSTONE — build first.**
+  (b) Faster panel: warp-shuffle reductions (research/exotic), Elmroth–Gustavson 2-level recursion,
+  register-resident for small n. (c) Further launch reduction (fuse more, larger blocks).
+- **n2048/n4096 (the big log contributors, 8.29 of 10.86):** v14 said cuSOLVER-bound with geqrf-panel
+  + FP32 trailing. RE-ATTACK with a custom blocked QR whose LARGE trailing GEMM uses **BF16x9** (the
+  trailing is compute-bound at these sizes, so 2–3× there could finally beat cuSOLVER). Even 1.5× here
+  saves ~1.2 in log → makes the mid-shape target easier. HARD but now the main lever for 2.5 ms.
+- Research pending: `research/gpumode_winners.md` (what past GPU MODE winners do — TMA, warp-spec,
+  persistent kernels, FP8/MX + error correction, CuTe-DSL/ThunderKittens). Mine it for tricks.
+Always: no substring "stream"; FP32 (H,tau); 19/19; keep timing CV low (D11); submit via popcorn `--mode leaderboard`.
+
+## (history) Prior goal 7128 µs — ACHIEVED by v17.
 
 ## How to run things (Windows, git-bash or PowerShell)
 - Modal iterate (no slot): `conda activate modal; $env:PYTHONUTF8=1;` then

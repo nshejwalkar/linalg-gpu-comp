@@ -96,5 +96,23 @@
       "b8_n2048": 77.0,
       "b2_n4096": 52.3
     }
+  },
+  {
+    "version": "v19",
+    "technique": "v17 + fused trailing subtract (baddbmm out=A_trail, beta=1 alpha=-1) + cut copies (61%->7%)",
+    "timestamp": "2026-06-15",
+    "geomean_speedup": 11.1,
+    "geomean_time_ms": 4.03,
+    "leaderboard": true,
+    "beats_target_7128us": true,
+    "shapes": {
+      "b20_n32": 0.0269,
+      "b40_n176": 0.634,
+      "b40_n352": 1.634,
+      "b640_n512": 13.3,
+      "b60_n1024": 11.7,
+      "b8_n2048": 76.8,
+      "b2_n4096": 52.2
+    }
   }
 ]
