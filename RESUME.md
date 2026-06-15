@@ -108,13 +108,26 @@ They were told NOT to edit findings.md/RESUME.md (avoid conflicts) — collect v
   ⚠️ first ranked use of the nvrtc/driver path → run popcorn `--mode test` before ranked. agent af3662100fc43ee11.
 
 ## NEXT (in order)
-1. **Integrate B+C → v24** (= v23 CUDA panel + v22 large-n BF16x9 branch, both with fallbacks), validate
-   on Modal (19/19, geomean, CV), popcorn `--mode test` (confirm nvrtc+cublasLt on grader), then submit to
-   BOTH `qr` and `qr_v2`. Update trackers.
-2. **THEN go ALL IN on the tcgen05/TMEM warp-specialized megakernel** (user directive). Research running:
-   `research/tcgen05_tmem.md` (agent a01f665022e9bd333). Plan: Stage 1 tcgen05 BF16x9 GEMM spike (beat
-   cuBLAS on trailing shapes) → Stage 2 fused QR megakernel (TMEM-resident trailing, warp-spec). Ship via
-   the proven CuTe→cubin→driver-load pipeline (B8). The ONE architecture that escapes the B=32 wall.
+1. **v24 = `submissions/v24_combo.py` (= `submission.py`) ✅ BUILT + validated** (v23 CUDA panel for
+   n512/n1024 + v22 BF16x9 for n2048/n4096, disjoint dispatch, BOTH fallbacks proven, 19/19, "stream"-clean,
+   ranked wall 46.5s). Modal: n512 12.15, n1024 10.72, n2048 73.5, n4096 50.55 ms. **SUBMIT PENDING — both
+   `--mode test` and `--mode leaderboard` hit "0/0 ... per hour" hourly rate-limit (I'd already submitted
+   v19 to both boards this hour). RETRY when window resets:** `popcorn submit --gpu B200 --leaderboard qr
+   --mode leaderboard --no-tui submission.py` then same for `qr_v2`. submission.py is already = v24. Then
+   update bench_history/PROGRESS. (v19 stays the live champion on both boards meanwhile — no harm.)
+2. **THEN go ALL IN on the tcgen05/TMEM megakernel** (user directive). Research DONE: `research/tcgen05_tmem.md`
+   (794 lines) + `research/blackwell_sources.md` (public refs). **Crux: a TMEM-resident accumulator
+   un-skinnies the rank-b trailing GEMM that B6/B7 killed** — that's why tcgen05 escapes the B=32 wall.
+   tcgen05.mma = single-thread issue, M=128/256, N≤256, K=16, NO native FP32 (only the accumulator is FP32 →
+   need BF16x9). TMEM = 128 lanes×512 cols. Plan:
+   - **Stage 0:** on Modal, `dir()`/`inspect.signature` the installed `nvidia-cutlass-dsl` to PIN the real
+     API (the CuTe Blackwell example bodies 404'd — pull `dense_blockscaled_gemm_persistent.py`/`grouped_gemm.py`
+     from the wheel). ⭐ ALSO evaluate the **Triton Gluon** route (`triton .../gluon/06-tcgen05.py`) — grader
+     HAS Triton, so Gluon may ship a tcgen05 kernel with NO cubin-embed. Pick the shippable route.
+   - **Stage 1:** standalone tcgen05 **BF16x9** GEMM matching our trailing shapes; kill-switch GATE vs
+     cublasLt (must beat it) before any Stage 2.
+   - **Stage 2:** fused QR megakernel (TMEM-resident trailing + warp-spec), ship via proven CuTe→cubin→
+     driver-load (B8) or Gluon. Honesty flags in tcgen05_tmem.md §9.5 (pipeline class names, perf unverified).
 
 ## (history) Prior goal 7128 µs — ACHIEVED by v17.
 
