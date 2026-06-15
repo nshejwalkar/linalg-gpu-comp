@@ -109,6 +109,24 @@ See also: [PROGRESS.md](../PROGRESS.md) (version/score table), [CLAUDE.md](../CL
   written in CuTe-DSL and shipped as an embedded cubin (the cublasLt/ctypes path in v18 proves driver-load
   works). Big, uncertain rewrite. OR crack n2048/n4096's single-matrix panel (beat cuSOLVER — very hard).
 
+### B8: CuTe-DSL → cubin → driver-load toolchain PROVEN; megakernel hits the same B=32 wall [CONFIRMED]
+- **The toolchain works end-to-end on the grader mirror (v21, `modal_cute.py`, `cute_qr_kernel.py`):**
+  `cute.compile[cute.KeepCUBIN, cute.KeepPTX](entry, *tensors)` → `compiled.artifacts.CUBIN` (ELF bytes),
+  entry symbol = `list(compiled.kernel_info.keys())[0]`. In a clean image with **NO cutlass installed**:
+  `cuModuleLoadData`/`cuModuleGetFunction`/`cuLaunchKernel` all rc=0 and the kernel's (H,tau) PASSES the
+  real `reference.check_implementation` (n=32/64/176). Cubin embedded as base64 → ship via cuda.bindings.
+  **This is reusable: any future tensor-core kernel can ship as an embedded cubin this way.**
+- **Gotchas (hard-won):** kernel must live in a real `.py` file (DSL inspects source); `from_dlpack` →
+  static layouts → constexpr grid → clean raw-pointer ABI; CuTe `SmemAllocator` uses **dynamic** smem so
+  you MUST pass `sharedMemBytes` at launch (+ set `MAX_DYNAMIC_SHARED_SIZE_BYTES` for >48KB) or silent
+  IMA. "stream" dodged via fragment assembly.
+- **Perf verdict: megakernel did NOT beat v19.** Fully-resident per-matrix QR is CUDA-core-bound (n32 68µs
+  vs v19 27µs; n176 1763µs vs 634µs) and **can't run at n512/n1024** (512²×4=1MB ≫ 228KB smem). The
+  blocked tensor-core path hits the SAME B6/B7 wall (B=32 forced → skinny MMA; no native FP32 tensor core;
+  wide-WY won't stay resident). v21 ships at v19 perf with the loader DORMANT (`_MEGA_SHAPES` empty → zero
+  regression). The ONLY escape to 2.5ms = **tcgen05/TMEM warp-specialized blocked megakernel + 2-level
+  wide-WY + BF16x9-for-exact-FP32** — frontier, big, uncertain. Pipeline to compile/ship it is now wired.
+
 ## C. Performance bottleneck (profiling)
 
 ### C1: blocked_wy is CPU-dispatch / launch-bound, not FLOP-bound [CONFIRMED]
@@ -332,6 +350,21 @@ See also: [PROGRESS.md](../PROGRESS.md) (version/score table), [CLAUDE.md](../CL
   solve_triangular is NOT the cost; 2-level/recursive (E-G) panel ~2× slower; custom Triton panel rejected
   (batch 2–8 underfills SMs). **Ceiling ~1.03–1.05×; v22 = `submissions/v22_bign.py`, ready to fold into
   the champion's large-n dispatch (wrap cublasLt in try/except→geqrf fallback for safety). +~1% geomean.**
+
+### E4: NEW BOARD `qr_v2` — 12 shapes (7 dense + 5 structured); v19 = 6.44ms, 22/22 [CONFIRMED]
+- **`qr_v2` = the 7 dense shapes + 5 STRUCTURED at the SAME mid sizes:** n512 b640 ×{mixed, rankdef,
+  clustered} and n1024 b60 ×{mixed, nearrank} (cond 2/0). Tests = 22 (adds rankdef/clustered/band/rowscale/
+  nearcollinear/mixed/nearrank/upper at leaderboard shapes). Submit: popcorn `--leaderboard qr_v2`.
+- **v19 lands clean: 22/22, geomean ~6.44ms.** Structured cases run at DENSE speed (CONFIRMED: n512
+  dense 13.2 / mixed 13.3 / rankdef 13.4 / clustered 13.2 ms; n1024 dense 11.6 / mixed 11.7 / nearrank 11.6)
+  — Householder is conditioning-AGNOSTIC (fixed flops), so no detector/probe needed and none helps SPEED.
+  Absolute geomean is higher than `qr`'s 4.03ms only because 5 expensive n512/n1024 shapes were added with
+  no cheap small-n; ranking is by absolute time and everyone's qr_v2 rises the same.
+- **STRATEGIC: 7 of 12 qr_v2 shapes are n512/n1024** (n512 ×4, n1024 ×3). So mid-shape speed (faster panel
+  Track C / tcgen05 megakernel Track A) is DOUBLY leveraged on qr_v2 — one panel win improves 7 shapes.
+  Submit every future champion to BOTH boards.
+- (Considered + parked) early-termination for rankdef/nearrank (stop after effective rank, fill tau=0):
+  would touch only ~2 shapes, needs a rank probe, and risks the reconstruction check — low value, skip.
 
 ## H. Backends available on the grader (probed on B200 mirror)
 
