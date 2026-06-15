@@ -41,16 +41,20 @@ frontier (the "gold" is tcgen05/Stage 2 — NVIDIA-sponsored comps want their st
 - **GATE (goal 3) = NO-GO (decisive, findings B9):** tcgen05 BF16x9 LOST 0/6 by 70–330× (740–2955µs vs
   cublasLt type-78 ~9µs). Reason: **cublasLt-78 IS a fully-tuned tcgen05+Ozaki kernel** → already does the
   trailing GEMM at speed-of-light; the "TMEM un-skinnies it" thesis (assumed a skinny *batched* rival) is wrong.
-- **HEADROOM ⇒ v19's structure can't reach 2.5ms incrementally:** mid-shape = panel 42% + GEMM 48% (cuBLAS-
-  optimal) + copies 7%. A megakernel only fuses away ~7% (copies/overhead); the 48% GEMM floor is immovable.
-  **2.5ms needs a FUNDAMENTALLY DIFFERENT approach.** (The fastest `qr` competitor solutions — user fetching —
-  are now the key to finding it. Don't blindly build the full warp-spec megakernel: undermined + low headroom.)
-- **DECISION MADE (gate NO-GO):** (1) bank v19/v24/v22 (the validated wins). (2) Do NOT build Stage-2
-  megakernel speculatively. (3) Await the competitor solutions (esp. fastest `qr`) to identify the real 2.5ms
-  path. (4) tcgen05 BF16x9 GEMM is a PROVEN, ready asset (recipe above) if a solution shows it's used helpfully.
-- **NEXT ACTIONS (autonomous window):** land **v24 on BOTH boards** (retry — earlier submit hit the daily
-  rate-limit; `cp submissions/v24_combo.py submission.py` then popcorn `--leaderboard qr` AND `qr_v2`);
-  finalize `tcgen05-opus` branch; when solutions arrive → analyze + decide the next real lever.
+- **CORRECTION — gate tested the WRONG shape + 2.5ms is NOT mathematically blocked:** the gate benchmarked
+  SINGLE fat GEMMs (K=64-256) where cuBLAS-78 is optimal. But v19's ACTUAL trailing update is a BATCHED SKINNY
+  bmm (K=B=32, batch 640/60) — UNTESTED by the gate. Roofline: v19 runs n512 at only ~8.6 TFLOP/s vs ~60
+  TFLOP/s FP32 roofline (~7× headroom; QR is panel-bound/intrinsically inefficient, but not floored). So the
+  "48% GEMM floor blocks 2.5ms" claim was TOO STRONG.
+- **CORRECTED TARGETED TEST (running, opus):** does tcgen05 BF16x9 beat cuBLAS on v19's REAL batched K=32
+  trailing-update shape (640×[m×32]@[32×p])? If YES → drop-in replacement (exact FP32, like v22 for large-n)
+  = real mid-shape win, NO full megakernel needed. If NO → trailing is optimal, only the panel (v23) remains.
+  Also: where's the ~7× roofline headroom (panel vs trailing)? Verdict guides the next real lever.
+- **Banked/standing:** v19 live on both boards. v24 (panel+large-n) staged+committed but **submit BLOCKED by
+  leaderboard rate-limit (`0/0 per hour`, persists >1.5h → likely DAILY/account cap)** — retry later:
+  `popcorn submit --gpu B200 --leaderboard qr|qr_v2 --mode leaderboard --no-tui submission.py` (=v24). tcgen05
+  BF16x9 GEMM = proven reusable asset. Competitor solutions (user fetching, esp. fastest `qr`) = key for any
+  fundamentally-different 2.5ms approach.
 - **Agents:** ALL DONE (sonnet kernel stopped @superseded; sonnet resources done → `cutedsl_patterns.md`;
   opus kernel `a79e04da385ad0c19` delivered the NO-GO verdict). No live agents. Monitor rule: ERR ON CAUTION
   killing, agent `.output` size is NOT a liveness signal ([[check-subagents-periodically]]).
