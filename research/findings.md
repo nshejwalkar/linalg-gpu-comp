@@ -152,6 +152,23 @@ See also: [PROGRESS.md](../PROGRESS.md) (version/score table), [CLAUDE.md](../CL
   those are now the key input to identify the fundamentally-different 2.5ms approach. tcgen05 stays a proven,
   ready capability if a solution shows it's used in a way that helps.
 
+### B10: CORRECTED gate (batched-K32) + clean roofline — trailing NOT a lever; 2.5ms = different panel/algo [CONFIRMED]
+- **Q1 (the shape B9's gate skipped):** v19's REAL trailing = batched bmm K=B=32 (batch 640/60). NO method
+  beats **torch.bmm FP32 (316µs n512-first, rel 2.58e-7 exact)** — it's what v19 already uses. tcgen05 BF16x9
+  44–58× slower (naive single-warp kernel, load-bound); **cuBLAS-78 batched BROKEN at K=32** (strided type-78
+  → NaN/no-op, heuristic rc=15; per-matrix loop slower 2675µs + imprecise rel 2.95e-3). ⇒ BOTH ends of the
+  trailing space (B9 fat-single + B10 batched-skinny) tested → tcgen05 helps NEITHER. No drop-in trailing win.
+- **Q2 (clean roofline, phase-sum reconciles to e2e do_bench 0.99×/0.93× — no double-count):** v19 n512 =
+  **8.6 TFLOP/s, n1024 = 7.4** (7–8× below 60 FP32 RL). Gap is SPLIT, not one culprit:
+  - PANEL (Triton Householder): **40–44%**, no-FLOP, sequential/reduction-bound → ALGORITHMIC, not a GEMM-RL problem.
+  - TRAILING Y@W (K=32 baddbmm): **28–31% @ only 23% RL** (K=32 too skinny to saturate; un-fixable per Q1).
+  - WY C=Yᵀ@A_trail (wide-N bmm): 10% @ 57–68% RL (fine). TRISOLVE 10–13%. Gram/copies small.
+- **ROOT (the real wall):** both big levers (panel 40% + skinny-trailing 28%) trace to the **B=32 block-width
+  tension** — resident panel forces B=32 → skinny trailing; widening B fattens the trailing but can't stay
+  smem-resident (B7 DEAD). A 2.5ms solution must BREAK this tension: a fundamentally different panel (in-kernel
+  tensor-core / non-sequential / fast-non-resident) or a different factorization. Incremental GEMM swaps
+  CANNOT get there (rigorously confirmed B9+B10). ⇒ **fastest `qr` competitor solution = the key input.**
+
 ## C. Performance bottleneck (profiling)
 
 ### C1: blocked_wy is CPU-dispatch / launch-bound, not FLOP-bound [CONFIRMED]

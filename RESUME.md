@@ -46,10 +46,15 @@ frontier (the "gold" is tcgen05/Stage 2 — NVIDIA-sponsored comps want their st
   bmm (K=B=32, batch 640/60) — UNTESTED by the gate. Roofline: v19 runs n512 at only ~8.6 TFLOP/s vs ~60
   TFLOP/s FP32 roofline (~7× headroom; QR is panel-bound/intrinsically inefficient, but not floored). So the
   "48% GEMM floor blocks 2.5ms" claim was TOO STRONG.
-- **CORRECTED TARGETED TEST (running, opus):** does tcgen05 BF16x9 beat cuBLAS on v19's REAL batched K=32
-  trailing-update shape (640×[m×32]@[32×p])? If YES → drop-in replacement (exact FP32, like v22 for large-n)
-  = real mid-shape win, NO full megakernel needed. If NO → trailing is optimal, only the panel (v23) remains.
-  Also: where's the ~7× roofline headroom (panel vs trailing)? Verdict guides the next real lever.
+- **CORRECTED TEST DONE (findings B10) — trailing NOT a lever; bottleneck = panel + B=32 tension:**
+  Q1: on v19's REAL batched-K=32 trailing, **torch.bmm FP32 (v19's current) wins** (316µs, exact); tcgen05
+  BF16x9 44-58× slower; cuBLAS-78 batched BROKEN at K=32. NO drop-in trailing win (both GEMM shapes now tested).
+  Q2 roofline (reconciles to e2e): v19 = 8.6 TFLOP/s; gap SPLIT = PANEL 40-44% (sequential, algorithmic) +
+  skinny-K=32 TRAILING 28-31% @ 23%RL (un-fixable). Both trace to the B=32 block-width tension (resident panel
+  → skinny trailing; wider B → non-resident, B7 dead). **2.5ms needs a fundamentally different panel/factorization.**
+- **HOLDING:** my analysis has exhausted the incremental space (tcgen05 GEMM dead both shapes; panel needs an
+  algorithmic change). **Next real input = the fastest `qr` competitor solution** (user fetching) → it should
+  reveal how the 2.5ms club breaks the B=32 tension. No more speculative spawns until then (avoid rabbit-hole).
 - **Banked/standing:** v19 live on both boards. v24 (panel+large-n) staged+committed but **submit BLOCKED by
   leaderboard rate-limit (`0/0 per hour`, persists >1.5h → likely DAILY/account cap)** — retry later:
   `popcorn submit --gpu B200 --leaderboard qr|qr_v2 --mode leaderboard --no-tui submission.py` (=v24). tcgen05
