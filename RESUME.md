@@ -55,11 +55,13 @@ frontier (the "gold" is tcgen05/Stage 2 — NVIDIA-sponsored comps want their st
 - **HOLDING:** my analysis has exhausted the incremental space (tcgen05 GEMM dead both shapes; panel needs an
   algorithmic change). **Next real input = the fastest `qr` competitor solution** (user fetching) → it should
   reveal how the 2.5ms club breaks the B=32 tension. No more speculative spawns until then (avoid rabbit-hole).
-- **Banked/standing:** v19 live on both boards. v24 (panel+large-n) staged+committed but **submit BLOCKED by
-  leaderboard rate-limit (`0/0 per hour`, persists >1.5h → likely DAILY/account cap)** — retry later:
-  `popcorn submit --gpu B200 --leaderboard qr|qr_v2 --mode leaderboard --no-tui submission.py` (=v24). tcgen05
-  BF16x9 GEMM = proven reusable asset. Competitor solutions (user fetching, esp. fastest `qr`) = key for any
-  fundamentally-different 2.5ms approach.
+- **Banked/standing:** v19 live on both boards (real champion). v24 (panel+large-n, ~3.9ms qr) staged+committed
+  but **submit BLOCKED by a HARD persistent cap (`0/0 per hour` confirmed across 3 retries over ~2.5h → it's a
+  DAILY/account cap, NOT hourly; today's quota spent on the v19→qr + v19→qr_v2 submissions).** Do NOT waste more
+  retries — submit when the cap resets (next day / fresh quota): `cp submissions/v24_combo.py submission.py`
+  then `popcorn submit --gpu B200 --leaderboard qr --mode leaderboard --no-tui submission.py` (+ `qr_v2`).
+  tcgen05 BF16x9 GEMM = proven reusable asset. Competitor solutions (user fetching, esp. fastest `qr`) = key
+  for any fundamentally-different 2.5ms approach.
 - **Agents:** ALL DONE (sonnet kernel stopped @superseded; sonnet resources done → `cutedsl_patterns.md`;
   opus kernel `a79e04da385ad0c19` delivered the NO-GO verdict). No live agents. Monitor rule: ERR ON CAUTION
   killing, agent `.output` size is NOT a liveness signal ([[check-subagents-periodically]]).
