@@ -1,0 +1,100 @@
+[
+  {
+    "version": "geqrf",
+    "technique": "torch.geqrf baseline (reference)",
+    "timestamp": "2026-06-14",
+    "geomean_speedup": 1.0,
+    "leaderboard": true,
+    "shapes": {
+      "b20_n32": 0.330,
+      "b40_n176": 21.757,
+      "b40_n352": 51.215,
+      "b640_n512": 1073.304,
+      "b60_n1024": 240.094,
+      "b8_n2048": 76.951,
+      "b2_n4096": 52.224
+    }
+  },
+  {
+    "version": "blocked_wy",
+    "technique": "pure-torch blocked WY Householder (no dispatch)",
+    "timestamp": "2026-06-14",
+    "geomean_speedup": 0.448,
+    "leaderboard": false,
+    "shapes": {
+      "b20_n32": 5.478,
+      "b40_n176": 33.098,
+      "b40_n352": 71.317,
+      "b640_n512": 113.592,
+      "b60_n1024": 211.535,
+      "b8_n2048": 405.960,
+      "b2_n4096": 827.726
+    }
+  },
+  {
+    "version": "v1",
+    "technique": "shape-dispatch: blocked_wy if batch>=128 & n>=256, else geqrf",
+    "timestamp": "2026-06-14",
+    "geomean_speedup": 1.29,
+    "leaderboard": true,
+    "shapes": {
+      "b20_n32": 0.324,
+      "b40_n176": 21.7,
+      "b40_n352": 50.9,
+      "b640_n512": 174.0,
+      "b60_n1024": 241.0,
+      "b8_n2048": 77.0,
+      "b2_n4096": 52.3
+    }
+  },
+  {
+    "version": "v9",
+    "technique": "hand-written Triton fused panel kernel + dispatch 128<=n<=1024 (M_POW2=next_pow2(n))",
+    "timestamp": "2026-06-15",
+    "geomean_speedup": 2.38,
+    "leaderboard": true,
+    "shapes": {
+      "b20_n32": 0.324,
+      "b40_n176": 9.31,
+      "b40_n352": 20.7,
+      "b640_n512": 49.4,
+      "b60_n1024": 69.6,
+      "b8_n2048": 76.8,
+      "b2_n4096": 52.2
+    }
+  },
+  {
+    "version": "v15",
+    "technique": "shared-memory resident Triton panel, ONE compile (fixed M_POW2=1024, num_warps=8) + dispatch 128<=n<=1024",
+    "timestamp": "2026-06-15",
+    "geomean_speedup": 3.27,
+    "leaderboard": true,
+    "shapes": {
+      "b20_n32": 0.323,
+      "b40_n176": 5.36,
+      "b40_n352": 10.7,
+      "b640_n512": 33.5,
+      "b60_n1024": 37.6,
+      "b8_n2048": 76.7,
+      "b2_n4096": 52.0
+    }
+  },
+  {
+    "version": "v17",
+    "technique": "per-n panel tiles + triangular-solve WY-build (~10x fewer launches) + fused n32 + geqrf for n>=2048",
+    "timestamp": "2026-06-15",
+    "geomean_speedup": 9.47,
+    "geomean_time_ms": 4.73,
+    "leaderboard": true,
+    "beats_target_7128us": true,
+    "shapes": {
+      "b20_n32": 0.0271,
+      "b40_n176": 0.843,
+      "b40_n352": 2.06,
+      "b640_n512": 17.9,
+      "b60_n1024": 15.6,
+      "b8_n2048": 77.0,
+      "b2_n4096": 52.3
+    }
+  }
+]
