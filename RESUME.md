@@ -65,15 +65,18 @@ v19 mid-shape profile: **panel ~42%, GEMMs ~48%** (mostly FP32, skinny).
 - **BF16x9 is DEAD for our shapes (findings B6):** exact + reachable (cublasLt/ctypes, type 78) but only
   wins at block width B≥128; our resident panel is smem-locked to B=32 → skinny GEMMs lose; n2048/n4096
   are panel-bound (~95%) so it barely helps there. v18 superseded by v19.
-- **KEY UNLOCK = height-tiled panel allowing B≥128.** Don't hold the whole (m,B) tile resident; tile the
-  panel height (cross-tile reductions for the column norm/dot). Bigger B → fatter trailing GEMMs (more
-  efficient FP32 AND re-enables BF16x9's ~2×) + fewer launches. This is the main remaining mid-shape lever.
-- **Faster panel (the 42%):** warp-shuffle reductions (research/exotic), Elmroth–Gustavson recursion.
-- **n2048/n4096 (8.30 of 9.76):** the wall — panel-bound, cuSOLVER-optimal. Beating it needs a faster
-  *single-matrix panel* (not trailing — BF16x9 doesn't help). Very hard; the other path to 2.5 ms.
-- Mine `research/gpumode_winners.md` (TMA, warp-spec, persistent kernels, CuTe-DSL) for panel ideas.
-- Reality check: we're at 4.03 ms / 11.1× (well past the original 7128 µs). 2.5 ms needs real
-  architectural work (height-tiled panel and/or cracking n2048/n4096) — no easy levers left.
+- **Height-tiled wide-B panel ALSO DEAD (findings B7, v20):** wide-B can't stay smem-resident → per-step
+  global re-reads → panel 91-93% of GPU, n512 5× SLOWER. **B=32 full-residence is the proven sweet spot**
+  ⇒ trailing GEMMs are permanently skinny (K=32) ⇒ BF16x9/fat-GEMM tricks can't help. v19 ≈ the ceiling
+  of the blocked-WY-resident-panel architecture (~4 ms). Both big incremental levers are exhausted.
+- **THE remaining path to 2.5 ms = a different architecture: fused tensor-core MEGAKERNEL.** Keep the
+  active region resident and do the trailing update with in-kernel MMA (tcgen05/WGMMA) so it's NOT a
+  skinny batched bmm — the winners' approach (gpumode_winners.md). Needs CuTe-DSL compiled offline →
+  embedded cubin (v18's cublasLt/ctypes proves driver-load works on the grader). BIG, uncertain rewrite.
+- **OR crack n2048/n4096 (8.30 of 9.76):** beat cuSOLVER's single-matrix panel. Very hard.
+- Reality check: we're at 4.03 ms / 11.1× — ~1.8× past the original 7128 µs goal. 2.5 ms is NOT an
+  incremental tweak away; it needs the megakernel rewrite or beating cuSOLVER. Awaiting user's call on
+  whether to commit that effort vs bank v19. (Mine `research/gpumode_winners.md` for megakernel tricks.)
 Always: no substring "stream"; FP32 (H,tau); 19/19; keep timing CV low (D11); submit via popcorn `--mode leaderboard`.
 
 ## (history) Prior goal 7128 µs — ACHIEVED by v17.

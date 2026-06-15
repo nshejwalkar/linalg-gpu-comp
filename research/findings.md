@@ -95,6 +95,20 @@ See also: [PROGRESS.md](../PROGRESS.md) (version/score table), [CLAUDE.md](../CL
   → **v18 superseded; v19 champion.** THE UNLOCK to revive BF16x9 (and fatten FP32 GEMMs) = a **height-tiled
   panel that allows B≥128** (don't hold the whole (m,B) tile resident). That's the next architectural lever.
 
+### B7: height-tiled wide-B panel DIED — B=32 full-residence is the sweet spot [CONFIRMED]
+- v20 tiled the panel height to allow B≥128 (fatten GEMMs, revive BF16x9). BF16x9 DID engage, but a
+  wide-B panel can't be smem-resident (512×128×4=256KB > 228KB) → per-step global re-reads → panel
+  became **91–93% of GPU** (n512 panel ~63ms vs v19's resident ~5.6ms). n512 69.5ms vs v19 13.3ms (5×
+  slower). 19/19, low CV — just slow. **v19 champion.**
+- **Strategic conclusion:** full-panel residence ⇒ B=32 ⇒ trailing GEMMs permanently SKINNY (K=32) ⇒
+  BF16x9 / fat-GEMM tricks can't help in the blocked-WY-with-resident-panel architecture. The two big
+  incremental levers (B6 BF16x9, B7 wide-B) are both DEAD. v19 ≈ the ceiling of this architecture (~4ms).
+- **To reach 2.5 ms** (needs mid shapes ~2×; GEMMs are 48% and stuck) likely requires a fundamentally
+  different kernel: a **fused tensor-core megakernel** (whole panel+trailing resident, in-kernel MMA via
+  tcgen05/WGMMA so the "GEMM" isn't a skinny batched bmm) — the winners' approach (gpumode_winners.md),
+  written in CuTe-DSL and shipped as an embedded cubin (the cublasLt/ctypes path in v18 proves driver-load
+  works). Big, uncertain rewrite. OR crack n2048/n4096's single-matrix panel (beat cuSOLVER — very hard).
+
 ## C. Performance bottleneck (profiling)
 
 ### C1: blocked_wy is CPU-dispatch / launch-bound, not FLOP-bound [CONFIRMED]
