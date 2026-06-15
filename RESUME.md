@@ -5,6 +5,16 @@ Read CLAUDE.md (overview) and research/findings.md (what's tried — don't repea
 
 _Last updated: 2026-06-15._
 
+## Repo layout (reorganized 2026-06-15)
+- ROOT (functional only): `submission.py` (champion=v19, popcorn submit target), `modal_qr.py` (PRIMARY iterate
+  driver — `modal run modal_qr.py --submission submissions/vXX.py --mode all` from root), `plot_progress.py`
+  + `bench_history.json` + `progress.svg` (trackers), `auto_bench.py`, `CLAUDE.md`, `RESUME.md`.
+- `submissions/` v1..v24 (+ submission_geqrf.py) · `research/` findings.md + all research/refs · `docs/` PROGRESS.md,
+  BEGINNERS_GUIDE.md · `tcgen05/` concluded tcgen05 work: `opus_stage1.py` (WORKING bit-exact BF16x9 GEMM),
+  `opus_bench.py`, `modal_cute.py`+`cute_qr_kernel.py`+`cubin_n32_b20.json` (CuTe driver — run FROM the tcgen05/
+  dir), `opus_progress.md`/`opus2_progress.md`, `stage1_v*.py` (sonnet) · `archive/scratch_logs/`+`archive/probes/`
+  (agent scratch, gitignored).
+
 ## Goal
 Original 7128 µs target on `qr` — ACHIEVED. Now pushing **2.5 ms** geomean on `qr`. Return (H,tau)
 geqrf compact format, FP32, B200. NOTE: there are now TWO official boards (submit wins to BOTH):

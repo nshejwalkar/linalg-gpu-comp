@@ -6,3 +6,5 @@ __pycache__/
 *.qdrep
 auto_bench_log.*
 probe_*.py
+*_out.txt
+*_err.txt
