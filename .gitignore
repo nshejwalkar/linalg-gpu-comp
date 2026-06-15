@@ -5,3 +5,4 @@ __pycache__/
 *.nsys-rep
 *.qdrep
 auto_bench_log.*
+probe_*.py

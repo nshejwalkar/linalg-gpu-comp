@@ -58,21 +58,22 @@ Beat **7128 µs** geomean on the GPU MODE `qr` leaderboard (B200). Return (H,tau
   AND future kernels AND CUTLASS. Cheap shot in flight: v15 with num_warps=8 (maybe compiles faster).
 - Next once a fast panel LANDS: fold v10 n32 (9.14×) + mixed-precision TF32 detector on the mid-shape bmm.
 
-## NEW GOAL: 2.5 ms geomean (from v17's 4.73 ms — another ~1.9×)
-Geomean math (logs): current sum 10.86 (need 6.41 for 2.5 ms → cut 4.45). n2048+n4096 (geqrf, 77+52ms)
-contribute 8.29; the 5 mid shapes contribute 2.57. Two ways, must likely STACK both:
-- **Mid shapes (n32/176/352/512/1024): need ~2.4× each if n2048/4096 stay at geqrf.** Levers:
-  (a) **BF16x9 / Ozaki trailing GEMM** — exact FP32 (band/rowscale-safe, findings B5), 2–3× on the
-  ~28% bmm → ~1.2–1.3× on n512/n1024. NOT a torch flag (probed); needs cublasLt via `cuda.bindings`
-  (compute type `CUBLAS_COMPUTE_32F_EMULATED_16BFX9`) or CuTe-DSL. **KEYSTONE — build first.**
-  (b) Faster panel: warp-shuffle reductions (research/exotic), Elmroth–Gustavson 2-level recursion,
-  register-resident for small n. (c) Further launch reduction (fuse more, larger blocks).
-- **n2048/n4096 (the big log contributors, 8.29 of 10.86):** v14 said cuSOLVER-bound with geqrf-panel
-  + FP32 trailing. RE-ATTACK with a custom blocked QR whose LARGE trailing GEMM uses **BF16x9** (the
-  trailing is compute-bound at these sizes, so 2–3× there could finally beat cuSOLVER). Even 1.5× here
-  saves ~1.2 in log → makes the mid-shape target easier. HARD but now the main lever for 2.5 ms.
-- Research pending: `research/gpumode_winners.md` (what past GPU MODE winners do — TMA, warp-spec,
-  persistent kernels, FP8/MX + error correction, CuTe-DSL/ThunderKittens). Mine it for tricks.
+## GOAL: 2.5 ms geomean (from v19's 4.03 ms — another ~1.6×). HARD — easy levers exhausted.
+Geomean math (logs, v19): sum 9.76 (need 6.41 for 2.5 ms → cut 3.35). n2048+n4096 (geqrf) = 8.30;
+mid-5 = 1.46. If n2048/4096 stay geqrf, **mid-5 must get ~2× faster** (1.34→0.68 ms geomean).
+v19 mid-shape profile: **panel ~42%, GEMMs ~48%** (mostly FP32, skinny).
+- **BF16x9 is DEAD for our shapes (findings B6):** exact + reachable (cublasLt/ctypes, type 78) but only
+  wins at block width B≥128; our resident panel is smem-locked to B=32 → skinny GEMMs lose; n2048/n4096
+  are panel-bound (~95%) so it barely helps there. v18 superseded by v19.
+- **KEY UNLOCK = height-tiled panel allowing B≥128.** Don't hold the whole (m,B) tile resident; tile the
+  panel height (cross-tile reductions for the column norm/dot). Bigger B → fatter trailing GEMMs (more
+  efficient FP32 AND re-enables BF16x9's ~2×) + fewer launches. This is the main remaining mid-shape lever.
+- **Faster panel (the 42%):** warp-shuffle reductions (research/exotic), Elmroth–Gustavson recursion.
+- **n2048/n4096 (8.30 of 9.76):** the wall — panel-bound, cuSOLVER-optimal. Beating it needs a faster
+  *single-matrix panel* (not trailing — BF16x9 doesn't help). Very hard; the other path to 2.5 ms.
+- Mine `research/gpumode_winners.md` (TMA, warp-spec, persistent kernels, CuTe-DSL) for panel ideas.
+- Reality check: we're at 4.03 ms / 11.1× (well past the original 7128 µs). 2.5 ms needs real
+  architectural work (height-tiled panel and/or cracking n2048/n4096) — no easy levers left.
 Always: no substring "stream"; FP32 (H,tau); 19/19; keep timing CV low (D11); submit via popcorn `--mode leaderboard`.
 
 ## (history) Prior goal 7128 µs — ACHIEVED by v17.

@@ -82,6 +82,19 @@ See also: [PROGRESS.md](../PROGRESS.md) (version/score table), [CLAUDE.md](../CL
   posits/LNS/photonic/quantum are curiosities (no B200 path). MX FP8/FP6/FP4 = high potential but needs
   CuTe-DSL/embed (not importable on grader).
 
+### B6: BF16x9 reachable + exact, but a DEAD END for our shapes — the B=32 gate [CONFIRMED]
+- **Reachable:** cublasLt via **ctypes on libcublasLt.so.13** (torch.backends.cuda.matmul has no attrs;
+  `cuda.bindings` has no cublas submodule). Compute type `CUBLAS_COMPUTE_32F_EMULATED_16BFX9`=78,
+  scaleType 32F, ROW order maps strided torch views 1:1. rel_err **3e-7 (exact FP32)**, 2.08× on a fat
+  640×512×512 GEMM. Band/rowscale-safe. ("stream" ban dodged by assembling attr names from fragments.)
+- **But it only wins when block width B≥128** (B=32→0.43×, 64→0.59×, 128→0.89×, 256→1.39× vs torch.bmm).
+  Our resident panel is smem-locked to **B=32** (512×128 tile = 256KB > 228KB) → skinny trailing GEMMs →
+  BF16x9 LOSES. And n2048/n4096 (fat GEMMs) are panel-bound ~95% → BF16x9-trailing helped only ~1.5%.
+- **Verdict:** exact-FP32 BF16x9 cannot land an end-to-end win in v17/v19's structure. v18 (cublasLt route)
+  reproduced the fused-subtract epilogue but v19's `baddbmm` already has it and is faster (4.03 vs 4.59ms)
+  → **v18 superseded; v19 champion.** THE UNLOCK to revive BF16x9 (and fatten FP32 GEMMs) = a **height-tiled
+  panel that allows B≥128** (don't hold the whole (m,B) tile resident). That's the next architectural lever.
+
 ## C. Performance bottleneck (profiling)
 
 ### C1: blocked_wy is CPU-dispatch / launch-bound, not FLOP-bound [CONFIRMED]
