@@ -1,25 +1,28 @@
 """
 opus_stage1.py — standalone tcgen05 BF16x9 GEMM (Stage 1 de-risk).
 
-Self-contained Modal app (like v11): builds a single tcgen05 MMA via the OFFICIAL
-CUTLASS-DSL Blackwell recipe (make_trivial_tiled_mma + make_smem_layout_a/b +
-partition_A/B + make_fragment_C in TMEM + cute.gemm), then a 9-pass BF16x9 Ozaki
-split for bit-exact FP32, then a perf gate vs cublasLt type-78 + torch FP32.
+Self-contained Modal app. Builds a single tcgen05 MMA via the CANONICAL CuTe-DSL
+Blackwell recipe (from CUTLASS examples/.../tutorial_gemm/fp16_gemm_0.py +
+dense_gemm.py, pinned by opus_probe_*), then a 9-pass BF16x9 Ozaki split for
+bit-exact FP32, then a perf gate vs cublasLt type-78 + torch FP32.
 
-Recipe pinned by opus_probe_* (build-only, no-hang):
-  tiled_mma = make_trivial_tiled_mma(BF16,BF16, K,K, FP32, ONE, (TILE_M,TILE_N))
-  sA_layout = make_smem_layout_a(tiled_mma, (TILE_M,TILE_N,BK), BF16, 1)  # swizzled, staged
-  sB_layout = make_smem_layout_b(tiled_mma, (TILE_M,TILE_N,BK), BF16, 1)
-  sA0 = sA[None,None,None,0]   # drop stage (rank-4 -> rank-3 tile)
-  thr = tiled_mma.get_slice(0)
-  tCrA = thr.partition_A(sA0); tCrB = thr.partition_B(sB0)
-  acc_tmem = <make TMEM tensor>; tCtAcc = thr.partition_C(acc_tmem)
-  tiled_mma.set(Field.ACCUMULATE, <bool>); cute.gemm(tiled_mma, tCtAcc, tCrA, tCrB, tCtAcc)
+PINNED RECIPE (the parts that were hard / non-obvious):
+  - tiled_mma = make_trivial_tiled_mma(BF16,BF16, K,K, FP32, ONE, (M,N))
+  - SMEM: layout = make_smem_layout_a/b(tiled_mma,(M,N,K),BF16,1); allocate_tensor
+    with layout=layout.outer, swizzle=layout.inner, byte_alignment=128.
+  - make_fragment: tCrA = tiled_mma.make_fragment_A(sA)  (on the staged SMEM tensor)
+  - TMEM: utils.TmemAllocator(holding_buf_ptr, barrier_for_retrieve=NamedBarrier(1));
+    tmem.allocate(512); ... wait_for_alloc(); retrieve_ptr(); make_tensor(ptr, acc.layout).
+    *** Using TmemAllocator (not raw arch.alloc_tmem) is REQUIRED — raw alloc gave a
+        "misaligned address" SM fault. ***
+  - MMA completion sync: PipelineUmmaAsync (producer=MMA warp commits; consumer=all
+    threads wait before reading TMEM). Raw mbarrier+commit HUNG.
+  - gemm: tiled_mma.set(Field.ACCUMULATE, k>0); cute.gemm(tiled_mma, acc, tCrA[k], tCrB[k], acc)
 
-BF16x9: x = x0+x1+x2 (3 bf16, exact split) => x*y = sum_{i,j} x_i*y_j (9 plain-sum
-products, no scaling) => accumulate all 9 in ONE TMEM accumulator, single epilogue.
+BF16x9: x = x0+x1+x2 (3 bf16, exact) => x*y = sum_{i,j} x_i*y_j (9 plain-sum products) =>
+accumulate all 9 in ONE TMEM accumulator (ACCUMULATE toggled), single epilogue.
 
-Anti-hang: server timeout=90; run every `modal run` under local `timeout 120`.
+Anti-hang: server timeout=90; every `modal run` under local `timeout 120`.
 """
 
 import modal
@@ -35,14 +38,16 @@ app = modal.App("qr-opus-stage1")
 
 
 # ---------------------------------------------------------------------------
-# Kernel source (written to a file inside the container, imported fresh).
-# Parameterized by TILE_M, TILE_N, NPASS at format time.
+# Kernel source, parameterized by TILE_M, TILE_N, NPASS at format time.
+# A is (TILE_M, BK*NPASS), B is (BK*NPASS, TILE_N); each pass consumes a BK=16 slice.
 # ---------------------------------------------------------------------------
-_KERNEL_SRC = r'''"""tcgen05 GEMM kernel — opus_stage1, official recipe."""
+_KERNEL_SRC = r'''"""tcgen05 GEMM kernel — opus_stage1, canonical recipe."""
 import cutlass
 import cutlass.cute as cute
 import cutlass.cute.arch as arch
 import cutlass.cute.nvgpu.tcgen05 as tc
+import cutlass.utils as utils
+import cutlass.pipeline as pipeline
 from cutlass.cute.nvgpu.common import OperandMajorMode
 from cutlass.utils import SmemAllocator
 import cutlass.utils.blackwell_helpers as bh
@@ -52,120 +57,117 @@ TILE_M: int = {TILE_M}
 TILE_N: int = {TILE_N}
 BK: int = 16          # one BF16 tcgen05 MMA instruction along K
 NPASS: int = {NPASS}  # 1 = single MMA smoke; 9 = BF16x9
+THREADS: int = 128
+
+
+@cute.struct
+class SharedStorage:
+    acc_mbar: cute.struct.MemRange[cutlass.Int64, 2]
+    tmem_holding_buf: cutlass.Int32
 
 
 @cute.kernel
-def _gemm_kernel(
-    gA: cute.Tensor,   # (TILE_M, BK*NPASS)  K-major (row-major), bf16
-    gB: cute.Tensor,   # (BK*NPASS, TILE_N)  K-major (row-major), bf16
-    gC: cute.Tensor,   # (TILE_M, TILE_N) fp32
-):
-    warp_id = arch.warp_idx()
-    lane_id = arch.lane_idx()
+def _gemm_kernel(gA: cute.Tensor, gB: cute.Tensor, gC: cute.Tensor):
     tidx, _, _ = arch.thread_idx()
+    warp_id = arch.warp_idx()
+    warp_id = arch.make_warp_uniform(warp_id)
+    lane_id = arch.lane_idx()
 
     tiled_mma = bh.make_trivial_tiled_mma(
-        BFloat16, BFloat16,
-        OperandMajorMode.K, OperandMajorMode.K,
+        BFloat16, BFloat16, OperandMajorMode.K, OperandMajorMode.K,
         Float32, tc.CtaGroup.ONE, (TILE_M, TILE_N),
     )
-
-    # Swizzled, staged SMEM layouts (one stage). Shape ((MN,K),1,1,stage).
     sA_layout = bh.make_smem_layout_a(tiled_mma, (TILE_M, TILE_N, BK), BFloat16, 1)
     sB_layout = bh.make_smem_layout_b(tiled_mma, (TILE_M, TILE_N, BK), BFloat16, 1)
 
     smem = SmemAllocator()
-    sA = smem.allocate_tensor(BFloat16, sA_layout, byte_alignment=1024)
-    sB = smem.allocate_tensor(BFloat16, sB_layout, byte_alignment=1024)
-    smem_tmem_ptr = smem.allocate(Uint32)
-    smem_mbar = smem.allocate(cutlass.Uint64)
+    storage = smem.allocate(SharedStorage)
+    sA = smem.allocate_tensor(element_type=BFloat16, layout=sA_layout.outer,
+                              byte_alignment=128, swizzle=sA_layout.inner)
+    sB = smem.allocate_tensor(element_type=BFloat16, layout=sB_layout.outer,
+                              byte_alignment=128, swizzle=sB_layout.inner)
 
-    # Move swizzle from the layout onto the pointer so the SMEM tensors have AFFINE
-    # layouts (required by make_fragment_A/B). Same physical addressing as the
-    # composed tensors, so element-wise loads through these are descriptor-consistent.
-    sA_aff = cute.make_tensor(cute.recast_ptr(sA.iterator, sA_layout.inner, BFloat16),
-                              sA_layout.outer)
-    sB_aff = cute.make_tensor(cute.recast_ptr(sB.iterator, sB_layout.inner, BFloat16),
-                              sB_layout.outer)
+    # TMEM allocation via the proper allocator (raw alloc_tmem misaligns).
+    tmem_alloc_barrier = pipeline.NamedBarrier(barrier_id=1, num_threads=THREADS)
+    tmem = utils.TmemAllocator(storage.tmem_holding_buf.ptr,
+                               barrier_for_retrieve=tmem_alloc_barrier)
+    tmem.allocate(512)
 
-    if warp_id == 0 and lane_id == 0:
-        arch.mbarrier_init(smem_mbar, 1)
+    # Accumulator completion pipeline (tcgen05 MMA -> mbarrier).
+    acc_producer, acc_consumer = pipeline.PipelineUmmaAsync.create(
+        num_stages=1,
+        producer_group=pipeline.CooperativeGroup(pipeline.Agent.Thread),
+        consumer_group=pipeline.CooperativeGroup(pipeline.Agent.Thread, THREADS),
+        barrier_storage=storage.acc_mbar.data_ptr(),
+    ).make_participants()
 
-    # Allocate TMEM accumulator: TILE_N columns (each column = one N, 128 lanes = M tile).
-    if warp_id == 0 and lane_id == 0:
-        arch.alloc_tmem(TILE_N, smem_tmem_ptr)
-        arch.relinquish_tmem_alloc_permit()
-
-    arch.sync_threads()
-
-    # --- MMA fragments (canonical dense_gemm.py recipe) ---
-    # make_fragment_A is called DIRECTLY on the staged SMEM tensor (affine, swizzle
-    # in ptr) -> (MMA, MMA_M, MMA_K, STAGE). NOT on partition_A (that's the GMEM path).
-    tCrA = tiled_mma.make_fragment_A(sA_aff)
-    tCrB = tiled_mma.make_fragment_B(sB_aff)
+    # MMA fragments (on the staged SMEM tensors).
+    tCrA = tiled_mma.make_fragment_A(sA)
+    tCrB = tiled_mma.make_fragment_B(sB)
     acc_shape = tiled_mma.partition_shape_C((TILE_M, TILE_N))
-    tCtAcc_fake = tiled_mma.make_fragment_C(acc_shape)
-    tmem_ptr = arch.retrieve_tmem_ptr(Float32, 128, smem_tmem_ptr)
-    tCtAcc = cute.make_tensor(tmem_ptr, tCtAcc_fake.layout)
+    tCtAcc = tiled_mma.make_fragment_C(acc_shape)
 
-    # Clean 2D SMEM views for the element-wise loads. Physical layout of the A tile
-    # is (M,K):(BK,1) and B tile is (N,K):(BK,1); swizzle lives in the ptr (recast),
-    # so these affine 2D views address exactly the same swizzled bytes the MMA reads.
-    sA_ld = cute.make_tensor(sA_aff.iterator, cute.make_layout((TILE_M, BK), stride=(BK, 1)))
-    sB_ld = cute.make_tensor(sB_aff.iterator, cute.make_layout((TILE_N, BK), stride=(BK, 1)))
+    tmem.wait_for_alloc()
+    tmem_ptr = tmem.retrieve_ptr(Float32)
+    tCtAcc = cute.make_tensor(tmem_ptr, tCtAcc.layout)
 
-    # ---- NPASS MMA passes, each loading a BK-wide K-slice, accumulating in TMEM ----
-    for p in range(NPASS):
-        k0 = p * BK
-        # Load A K-slice [:, k0:k0+BK] into sA (warp 0 cooperatively)
-        if warp_id == 0:
-            for i in range(TILE_M * BK // 32):
+    # Stage-sliced composed SMEM views for scalar loads ((M,K),1,1) -> [(m,k),0,0].
+    sA_c = sA[None, None, None, 0]
+    sB_c = sB[None, None, None, 0]
+    # GMEM C view matching the accumulator's rank-3 ((M,N),1,1) profile.
+    gC_part = cute.make_tensor(
+        gC.iterator, cute.make_layout(((TILE_M, TILE_N), 1, 1), stride=((TILE_N, 1), 0, 0)))
+
+    # ---- MMA: NPASS passes, each loads a BK-wide K-slice, accumulates in TMEM ----
+    # Entire MMA section in ONE warp-0 block (acquire/commit must share scope).
+    if warp_id == 0:
+        acc_empty = acc_producer.acquire_and_advance()
+        for p in cutlass.range(NPASS, unroll=1):
+            k0 = p * BK
+            for i in cutlass.range(TILE_M * BK // 32, unroll=1):
                 idx = lane_id + i * 32
                 m = idx // BK
                 k = idx % BK
-                sA_ld[m, k] = gA[m, k0 + k]
-            # Load B K-slice [k0:k0+BK, :] into sB as (n,k) from gB(k,n)
-            for i in range(BK * TILE_N // 32):
+                sA_c[(m, k), 0, 0] = gA[m, k0 + k]
+            for i in cutlass.range(BK * TILE_N // 32, unroll=1):
                 idx = lane_id + i * 32
                 n = idx // BK
                 k = idx % BK
-                sB_ld[n, k] = gB[k0 + k, n]
-        arch.fence_view_async_shared()
-        arch.sync_threads()
-
-        # MMA issue: tcgen05 is single-thread issue; gemm elects internally.
-        # MMA_K==1 here (BK=16 = one instruction), stage 0 -> slice (None,None,0,0).
-        if warp_id == 0:
+                sB_c[(n, k), 0, 0] = gB[k0 + k, n]
+            arch.fence_view_async_shared()
+            arch.sync_warp()
             tiled_mma.set(tc.Field.ACCUMULATE, p != 0)
             cute.gemm(tiled_mma, tCtAcc, tCrA[(None, None, 0, 0)],
                       tCrB[(None, None, 0, 0)], tCtAcc)
-            tc.commit(smem_mbar)
+        acc_empty.commit()
 
-        # Wait for this MMA to retire before reloading SMEM next pass.
-        if warp_id == 0 and lane_id == 0:
-            arch.mbarrier_wait(smem_mbar, p % 2)
-        arch.sync_threads()
+    tmem.relinquish_alloc_permit()
 
-    # ---- Epilogue: TMEM -> registers -> GMEM (all 128 threads, warps 0-3) ----
-    # 2D TMEM accumulator view (M,N):(65536,1) for the tmem-load tiled copy.
-    acc2d = cute.make_tensor(tmem_ptr, cute.make_layout((TILE_M, TILE_N), stride=(65536, 1)))
-    ld_op = tc.Ld32x32bOp(tc.Repetition.x1, tc.Pack.NONE)
+    # ---- Epilogue: wait MMA done, TMEM -> regs -> GMEM (epi sub-tiled, ref pattern) ----
+    acc_full = acc_consumer.wait_and_advance()
+
+    SUBTILE = 4
+    epi_tiler = ((cute.size(tCtAcc, mode=[0, 0]),
+                  cute.size(tCtAcc, mode=[0, 1]) // SUBTILE),)
+    tCtAcc_epi = cute.zipped_divide(tCtAcc, epi_tiler)   # (EpiTile, NumTiles)
+    gC_epi = cute.zipped_divide(gC_part, epi_tiler)
+
+    ld_op = tc.Ld32x32bOp(tc.Repetition.x64, tc.Pack.NONE)
     copy_atom = cute.make_copy_atom(ld_op, Float32)
-    tiled_copy = tc.make_tmem_copy(copy_atom, acc2d)
+    tmem_tiled_copy = tc.make_tmem_copy(copy_atom, tCtAcc_epi[None, 0])
+    thr_copy = tmem_tiled_copy.get_slice(tidx)
+    tDtC = thr_copy.partition_S(tCtAcc_epi)   # (TmemCpy, NumTmemCpy, NumTiles)
+    tDgC = thr_copy.partition_D(gC_epi)
+    # Register fragment sized to the GMEM destination per-thread shape (ref pattern).
+    tCrAcc = cute.make_rmem_tensor(tDgC[None, None, 0].shape, Float32)
+    for i in cutlass.range(cute.size(tDtC, mode=[2]), unroll=1):
+        cute.copy(tmem_tiled_copy, tDtC[None, None, i], tCrAcc)
+        arch.fence_view_async_tmem_load()
+        cute.autovec_copy(tCrAcc, tDgC[None, None, i])
 
-    thr_copy = tiled_copy.get_slice(tidx)
-    tSrc = thr_copy.partition_S(acc2d)
-    tDst = cute.make_fragment_like(tSrc)
-    cute.copy(tiled_copy, tSrc, tDst)
-    arch.fence_view_async_tmem_load()
-
-    gC_part = thr_copy.partition_D(gC)
-    for i in range(cute.size(tDst)):
-        gC_part[i] = tDst[i]
-
-    arch.sync_threads()
-    if warp_id == 0 and lane_id == 0:
-        arch.dealloc_tmem(smem_tmem_ptr, TILE_N)
+    acc_full.release()
+    pipeline.sync(barrier_id=1)
+    tmem.free(tmem_ptr)
 
 
 @cute.jit
@@ -175,7 +177,6 @@ def run_gemm(gA: cute.Tensor, gB: cute.Tensor, gC: cute.Tensor):
 
 
 def _build_kernel_module(tile_m, tile_n, npass, tag):
-    """Write + import a fresh kernel module with the given tile/pass config."""
     import sys, importlib.util
     src = _KERNEL_SRC.format(TILE_M=tile_m, TILE_N=tile_n, NPASS=npass)
     kpath = f"/root/_opus_kernel_{tag}.py"
@@ -189,15 +190,13 @@ def _build_kernel_module(tile_m, tile_n, npass, tag):
 
 
 def _split3_bf16(x):
-    """3-term bf16 Ozaki split: x ~= x0+x1+x2 (each bf16), residuals."""
-    import torch
     x0 = x.bfloat16(); r1 = x - x0.float()
     x1 = r1.bfloat16(); r2 = r1 - x1.float()
     x2 = r2.bfloat16()
     return x0, x1, x2
 
 
-@app.function(gpu="B200", image=cutlass_image, timeout=90)
+@app.function(gpu="B200", image=cutlass_image, timeout=90, retries=0)
 def smoke_test():
     """Single tcgen05 MMA, 128x256x16 BF16->FP32, vs A.float()@B.float()."""
     import torch, traceback
@@ -205,7 +204,7 @@ def smoke_test():
     from cutlass.cute.runtime import from_dlpack
 
     print("=" * 72)
-    print("OPUS STAGE1 SMOKE — single tcgen05 MMA (official recipe)")
+    print("OPUS STAGE1 SMOKE — single tcgen05 MMA (canonical recipe)")
     print("=" * 72)
     try:
         kmod = _build_kernel_module(128, 256, 1, "smoke")
@@ -222,8 +221,7 @@ def smoke_test():
 
     print("  Compiling...")
     try:
-        compiled = cute.compile(kmod.run_gemm, gA, gB, gC)
-        print("  COMPILE OK")
+        compiled = cute.compile(kmod.run_gemm, gA, gB, gC); print("  COMPILE OK")
     except Exception as e:
         print(f"  COMPILE FAILED: {type(e).__name__}: {e}"); traceback.print_exc(); return False
 
@@ -244,7 +242,7 @@ def smoke_test():
     return ok
 
 
-@app.function(gpu="B200", image=cutlass_image, timeout=90)
+@app.function(gpu="B200", image=cutlass_image, timeout=90, retries=0)
 def bf16x9_test():
     """BF16x9: 9 passes accumulating in TMEM => bit-exact FP32 (rel vs FP64 ~1e-6)."""
     import torch, traceback
@@ -264,10 +262,8 @@ def bf16x9_test():
     torch.manual_seed(123)
     A_fp32 = torch.randn(M, K, device="cuda", dtype=torch.float32)
     B_fp32 = torch.randn(K, N, device="cuda", dtype=torch.float32)
-
     a0, a1, a2 = _split3_bf16(A_fp32)
     b0, b1, b2 = _split3_bf16(B_fp32)
-    # 9 cross products, plain sum. Pack A-passes along K (concat 9 K-slices of width 16).
     pairs = [(a0,b0),(a0,b1),(a1,b0),(a0,b2),(a2,b0),(a1,b1),(a1,b2),(a2,b1),(a2,b2)]
     A_packed = torch.cat([ai for (ai, _) in pairs], dim=1).contiguous()   # (128, 16*9)
     B_packed = torch.cat([bi for (_, bi) in pairs], dim=0).contiguous()   # (16*9, 256)
@@ -277,8 +273,7 @@ def bf16x9_test():
 
     print("  Compiling...")
     try:
-        compiled = cute.compile(kmod.run_gemm, gA, gB, gC)
-        print("  COMPILE OK")
+        compiled = cute.compile(kmod.run_gemm, gA, gB, gC); print("  COMPILE OK")
     except Exception as e:
         print(f"  COMPILE FAILED: {type(e).__name__}: {e}"); traceback.print_exc(); return False
 
